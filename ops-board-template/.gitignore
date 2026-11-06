@@ -1,0 +1,15 @@
+# 生成物
+dist/
+
+# 交互验收的截图和临时配置
+.uitest/
+.tmp-shot*.png
+
+# 依赖
+node_modules/
+
+# 系统杂物
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log

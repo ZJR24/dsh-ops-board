@@ -1,0 +1,64 @@
+{
+  "name": "dsh-ops-board",
+  "version": "0.1.0",
+  "description": "在 Harness 里挂一个「项目看板」：全局面板 + 侧栏入口，本地看板服务由宿主启动并代理。",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md",
+    "sync.ps1",
+    "test/*.mjs"
+  ],
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "ops-board",
+    "ledger",
+    "issue-tracker"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZJR24/dsh-ops-board.git"
+  },
+  "homepage": "https://github.com/ZJR24/dsh-ops-board#readme",
+  "bugs": {
+    "url": "https://github.com/ZJR24/dsh-ops-board/issues"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.2 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/dsh-client-ui-layout": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "^0.2.0-rc.2"
+  }
+}

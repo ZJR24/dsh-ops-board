@@ -1,0 +1,19 @@
+{
+  "name": "ops-board-template",
+  "version": "0.1.0",
+  "private": true,
+  "description": "通用项目工作台：一份台账 JSON 渲染成一份可查、可问的工作报文",
+  "type": "module",
+  "scripts": {
+    "render": "node scripts/render.mjs",
+    "verify": "node scripts/verify-board.mjs",
+    "serve": "node scripts/serve.mjs",
+    "ask": "node scripts/ask.mjs",
+    "uitest": "node scripts/uitest.mjs",
+    "uitest:offline": "node scripts/offline-test.mjs",
+    "build": "node scripts/render.mjs && node scripts/verify-board.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "项目看板（Ops Board）",
+    "description": "把 ops-board 的台账报文页嵌进 Harness：整页面板 + 左栏图标，自动拉起本地看板服务，问 AI 走 Harness 会话。"
+  }
+}

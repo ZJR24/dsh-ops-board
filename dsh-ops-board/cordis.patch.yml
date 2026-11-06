@@ -1,0 +1,5 @@
+# dsh-ops-board bundle patch — mounts the host half.
+# Client half is picked up from package.json dsh.client + exports["./client"].
+- insert:
+    - id: ops-board
+      name: dsh-ops-board

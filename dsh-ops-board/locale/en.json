@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Project Board (Ops Board)",
+    "description": "Hosts the ops-board ledger report inside Harness: a full-page panel plus a sidebar icon, starting and proxying the local board service. Asks go to a Harness session."
+  }
+}

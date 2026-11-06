@@ -1,0 +1,13 @@
+# 生成物
+ops-board-template/dist/
+ops-board-template/skills.json
+
+# 运行时数据 —— 绝不要提交：里面记着本机绝对路径和真实台账
+data/
+*.local.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

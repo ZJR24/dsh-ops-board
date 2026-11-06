@@ -1,0 +1,300 @@
+{
+  "schemaVersion": 2,
+  "project": {
+    "name": "工作报文",
+    "subtitle": "通用项目工作台 · 问题与需求",
+    "slug": "ops-board"
+  },
+  "metricStatuses": ["ok", "warn", "danger", "muted"],
+  "theme": "night",
+  "views": [
+    {
+      "key": "overview",
+      "label": "总览",
+      "kind": "overview"
+    },
+    {
+      "key": "lane:feature",
+      "label": "新增功能",
+      "kind": "lane",
+      "lane": "feature"
+    },
+    {
+      "key": "lane:bug",
+      "label": "问题修复",
+      "kind": "lane",
+      "lane": "bug"
+    },
+    {
+      "key": "lane:risk",
+      "label": "风险",
+      "kind": "lane",
+      "lane": "risk"
+    },
+    {
+      "key": "closed",
+      "label": "已修复 / 已关闭 / 暂停",
+      "kind": "closed"
+    },
+    {
+      "key": "skills",
+      "label": "Skill 统计",
+      "kind": "skills"
+    }
+  ],
+  "lanes": [
+    {
+      "key": "bug",
+      "label": "问题",
+      "prefix": "BUG",
+      "countNoun": "问题",
+      "openNoun": "未收口",
+      "rankBySeverity": true,
+      "stages": [
+        {
+          "key": "todo",
+          "label": "待解决",
+          "statuses": [
+            "open",
+            "doing",
+            "watch"
+          ],
+          "tone": "danger",
+          "open": true
+        },
+        {
+          "key": "verify",
+          "label": "待验证",
+          "statuses": [
+            "verify"
+          ],
+          "tone": "warn",
+          "open": true
+        },
+        {
+          "key": "done",
+          "label": "已解决",
+          "statuses": [
+            "fixed",
+            "closed"
+          ],
+          "tone": "ok",
+          "open": false
+        }
+      ],
+      "statusLabels": {
+        "open": "待处理",
+        "doing": "处理中",
+        "verify": "待复核",
+        "watch": "观察",
+        "fixed": "已修复",
+        "closed": "已关闭"
+      },
+      "severity": {
+        "levels": [
+          {
+            "key": "critical",
+            "label": "紧急",
+            "tone": "danger"
+          },
+          {
+            "key": "high",
+            "label": "高",
+            "tone": "danger"
+          },
+          {
+            "key": "medium",
+            "label": "中",
+            "tone": "warn"
+          },
+          {
+            "key": "low",
+            "label": "低",
+            "tone": "muted"
+          }
+        ]
+      }
+    },
+    {
+      "key": "feature",
+      "label": "需求",
+      "prefix": "FEAT",
+      "countNoun": "功能",
+      "openNoun": "未上线",
+      "rankBySeverity": false,
+      "stages": [
+        {
+          "key": "planned",
+          "label": "计划中",
+          "statuses": [
+            "planned"
+          ],
+          "tone": "muted",
+          "open": true
+        },
+        {
+          "key": "doing",
+          "label": "开发中",
+          "statuses": [
+            "doing"
+          ],
+          "tone": "info",
+          "open": true
+        },
+        {
+          "key": "review",
+          "label": "提审中",
+          "statuses": [
+            "review"
+          ],
+          "tone": "warn",
+          "open": true
+        },
+        {
+          "key": "shipped",
+          "label": "已上线",
+          "statuses": [
+            "shipped"
+          ],
+          "tone": "ok",
+          "open": false
+        },
+        {
+          "key": "paused",
+          "label": "暂停",
+          "statuses": [
+            "paused"
+          ],
+          "tone": "muted",
+          "open": false
+        }
+      ],
+      "statusLabels": {
+        "planned": "计划中",
+        "doing": "开发中",
+        "review": "提审中",
+        "shipped": "已上线",
+        "paused": "暂停"
+      }
+    },
+    {
+      "key": "risk",
+      "label": "风险",
+      "prefix": "RISK",
+      "countNoun": "风险",
+      "openNoun": "未解除",
+      "rankBySeverity": true,
+      "stages": [
+        {
+          "key": "watching",
+          "label": "观察中",
+          "statuses": [
+            "watching"
+          ],
+          "tone": "warn",
+          "open": true
+        },
+        {
+          "key": "mitigating",
+          "label": "缓解中",
+          "statuses": [
+            "mitigating"
+          ],
+          "tone": "info",
+          "open": true
+        },
+        {
+          "key": "resolved",
+          "label": "已解除",
+          "statuses": [
+            "resolved"
+          ],
+          "tone": "ok",
+          "open": false
+        },
+        {
+          "key": "accepted",
+          "label": "已知并接受",
+          "statuses": [
+            "accepted"
+          ],
+          "tone": "muted",
+          "open": false
+        }
+      ],
+      "statusLabels": {
+        "watching": "观察中",
+        "mitigating": "缓解中",
+        "resolved": "已解除",
+        "accepted": "已知接受"
+      },
+      "severity": {
+        "levels": [
+          {
+            "key": "critical",
+            "label": "紧急",
+            "tone": "danger"
+          },
+          {
+            "key": "high",
+            "label": "高",
+            "tone": "danger"
+          },
+          {
+            "key": "medium",
+            "label": "中",
+            "tone": "warn"
+          },
+          {
+            "key": "low",
+            "label": "低",
+            "tone": "muted"
+          }
+        ]
+      }
+    }
+  ],
+  "priority": {
+    "label": "先做这几件",
+    "limit": 3
+  },
+  "ask": {
+    "enabled": true,
+    "title": "台账助手",
+    "systemPrompt": "你是「{{project}}」的项目台账助手。用户是这个项目的负责人，手上有这本台账，但不一定记得每条细节。\n\n【台账现状】\n更新时间：{{updatedAt}}\n共 {{totalCount}} 条，未收口 {{openCount}} 条。\n\n未收口清单（按严重度）：\n{{openList}}\n\n全部条目索引：\n{{index}}\n\n【当前关注】\n{{focus}}\n\n【回答规则】\n1. 只基于上面的台账信息回答，以及用户在对话里补充的内容。查不到就直说缺什么，不要编造数字、日期、文件路径。\n2. 这条台账的特点是每条都留了证据线索。如果证据里给了命令或文件路径，可以告诉用户去跑/去看，但不要假装自己已经查过。\n3. 没有实测证据就不要建议把状态改成「已修复」。这是这本台账唯一的规矩。\n4. 先说结论，再展开。话要短，别复述用户已经知道的东西。\n5. 用中文，不要用项目符号堆砌，能一句话说清就别写三条。\n6. 用户说「解决一下」时可以动手改文件、跑命令；但不要动 ledger.json 和 board.config.json —— 那本台账是他自己记的账，改它等于篡改结果。要改状态就提建议，不要自己写进去。",
+    "itemQuick": [
+      {
+        "label": "现在什么情况",
+        "prompt": "这条现在什么情况？台账里写的还成不成立？有没有新变化？"
+      },
+      {
+        "label": "别动手，和我讨论一下",
+        "prompt": "先别动手，也别急着给方案。把这件事的来龙去脉摆清楚：起因是什么、现在卡在哪、有哪几种看法。我们讨论一下再定。"
+      },
+      {
+        "label": "给出处理方案",
+        "prompt": "给我 2 到 3 条处理路径，每条说清代价、风险和取舍，最后说明你推荐哪条、为什么。"
+      },
+      {
+        "label": "解决一下",
+        "prompt": "按你推荐的那条动手做。能直接改的就改，改完告诉我改了哪些文件、怎么验证；改不动的说清需要我做什么。"
+      }
+    ]
+  },
+  "labels": {
+    "overviewHint": "点击标题看详情",
+    "skillsTitle": "Agent 用过的与产出的",
+    "tableHeaders": {
+      "id": "编号",
+      "severity": "严重度",
+      "title": "标题",
+      "status": "状态",
+      "area": "区域",
+      "updated": "更新"
+    },
+    "historyTitle": "处理记录",
+    "metricsTitle": "监控参数",
+    "snapshotTitle": "快照与回归",
+    "copyButton": "复制"
+  }
+}

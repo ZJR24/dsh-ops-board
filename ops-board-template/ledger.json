@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 2,
+  "project": {
+    "slug": "board",
+    "name": "我的项目",
+    "subtitle": "项目工作报文 · 项目台账"
+  },
+  "updatedAt": "2026-11-06T09:48:17.697Z",
+  "headline": "台账还空着",
+  "deck": "把第一条问题 / 需求 / 风险写进 ledger.json，刷新就能看到。",
+  "conclusion": "",
+  "highlights": [],
+  "metrics": [],
+  "snapshot": [],
+  "items": [],
+  "history": []
+}
