@@ -703,6 +703,8 @@ const claimsPath = resolve(argValue("claims") || join(ROOT, "flow-claims.json"))
   —— 「改了一处，跑了三个测试就以为没坏」。现在 `SUITES` 数组登记 23 项，`npm test`/`npm run gate`
   一条命令跑完：先渲染双板 → `verify-board` → 逐项跑测试，打印每项耗时，任一失败即 exit 1。
   支持 `--fast`（跳过 11 项慢的，实跑 12 项）、`--list`、`--only <子串>`。
+  > 这里的 23/12 是**十九改当天**的数字。二十改加了 `stage-ask` 双板后是 **25 项 / --fast 14 项**，
+  > 以 §5.2 的基线为准。
   - ✓ 已做**负向验证**：往 `client.js` 的状态表塞一个假状态 → 门禁红并**点名**失败的那一项。
 - **新增 `scripts/status-consistency-test.mjs`（10 项）**：`flow.mjs` 的 `OPEN_STATUSES`（Set）与
   `client.js` 的 `isOpenWbStatus`（数组）是**手抄的两份**（`client.js` 是单 IIFE、被内联进 HTML，
@@ -814,9 +816,15 @@ const claimsPath = resolve(argValue("claims") || join(ROOT, "flow-claims.json"))
 - **产物**：cyber 873.1 → **879.0 KB**、practise 375.8 → **381.7 KB**（两块各多一张待处理表 + 一个按钮）。
   体积涨是因为待处理表**搬家而不是消失**，条目本身没变（61 / 11 卡，6 视图，id 154 / 101 全唯一）。
 
-- **测试**：`npm run gate` → **23 通过 / 0 失败（271.1s）**；`npm run uitest` 双板 → **交互验收通过**
-  （cyber 与 practise 各跑一次，〔4〕改点后仍真实命中，不是跳过）。
-  ⚠️ `uitest.mjs` **不在** `gate.mjs` 的 23 项里（它是人工按需执行的），**改完渲染相关的东西必须单独跑它**。
+- **测试**：新增 `stage-ask-test.mjs`（**31/0**，双板）专盯本轮三件事 —— 按钮在「计划中」分节标题里
+  （且**不在** `.stage-board` 数字格里，把撤回的第 4 项钉死）、点它开面板作用域是「新增功能」、
+  发出去的 `item="__feature__"` / `title="新增功能"` / 上下文覆盖**全部**需求条目
+  （用台账条数与问题里「共 N 条」对照，不写死数字 —— practice 板 4 条全是未收口，
+  一开始那条「含已上线」的断言在小板上误红了）、两块待处理表在各自车道页第一行第一模块且总览零张表。
+  已做负向验收：把按钮从 `.section-head` 摘掉 → **16/11 红**，还原后 31/0。
+  `npm run gate` → **25 通过 / 0 失败（286.1s）**（23 + 新增 stage-ask 双板）；
+  `npm run uitest` 双板 → **交互验收通过**。
+  ⚠️ `uitest.mjs` **不在** `gate.mjs` 的 25 项里（它是人工按需执行的），**改完渲染相关的东西必须单独跑它**。
 
 ---
 
@@ -829,8 +837,8 @@ const claimsPath = resolve(argValue("claims") || join(ROOT, "flow-claims.json"))
 
 ```powershell
 cd D:\WorkSpace-Tools\ops-board
-npm run gate          # 渲染双板 → verify-board → 23 套测试，逐项报耗时，任一失败 exit 1
-npm test              # = gate --fast，跳掉 11 项慢的、实跑 12 项（约 174s，改完随手跑）
+npm run gate          # 渲染双板 → verify-board → 25 套测试，逐项报耗时，任一失败 exit 1
+npm test              # = gate --fast，跳掉 11 项慢的、实跑 14 项（约 188s，改完随手跑）
 node scripts/gate.mjs --list            # 看都登记了哪些套件
 node scripts/gate.mjs --only workbench  # 只跑名字含 workbench 的（调试时用）
 ```
@@ -849,8 +857,8 @@ node scripts\<测试名>.mjs --board "D:\WorkSpace-Tools\ops-board-reports\<看�
 
 ### 5.2 基线（全部绿，2026-11-19 二十改后实测）
 
-**总基线：`npm run gate` → 23 通过 / 0 失败（271.1s）；`npm test`（--fast）→ 12 通过 / 0 失败（174.4s）。**
-**另需人工跑 `npm run uitest`（双板）→ 交互验收通过** —— 它不在 gate 的 23 项里，改渲染相关的东西必须单独跑。
+**总基线：`npm run gate` → 25 通过 / 0 失败（286.1s）；`npm test`（--fast）→ 14 通过 / 0 失败（188.4s）。**
+**另需人工跑 `npm run uitest`（双板）→ 交互验收通过** —— 它不在 gate 的 25 项里，改渲染相关的东西必须单独跑。
 
 | 套件 | 结果 | 说明 |
 |---|---|---|
@@ -867,6 +875,7 @@ node scripts\<测试名>.mjs --board "D:\WorkSpace-Tools\ops-board-reports\<看�
 | `evidence-look-test.mjs` | 41 / 0 | 证据链（`cyber-egg-basket`）/ 25（`practise`） |
 | `float-test.mjs` | 51 / 0 | 悬浮面板 |
 | `card-fold-test.mjs` | 16 / 0（cyber）12 / 0（practise） | 卡片折叠 |
+| `stage-ask-test.mjs` | **31 / 0**（cyber）**31 / 0**（practise） | 二十改三件事：「计划中」右侧 AI 入口（在分节标题里、不在数字格、空阶段也在）/ 点开作用域是「新增功能」/ 请求 `item="__feature__"` 且上下文覆盖全部需求条目 / 两块待处理表在各自车道页第一模块、总览零张表 |
 | `msg-align-test.mjs` | 9 | 消息对齐 |
 | `verify-board.mjs` | 两块都过 | 产物自检 |
 

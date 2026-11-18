@@ -727,8 +727,8 @@ node scripts/gen-ledger.mjs --items-file 候选条目.json [--board <看板目�
 改完东西不知道该跑哪几个测试？不用记。
 
 ```powershell
-npm run gate          # 渲染双板 → verify-board → 23 套测试，逐项报耗时，任一失败 exit 1
-npm test              # = gate --fast，跳掉 11 项慢的、实跑 12 项（约 174s，改完随手跑这个）
+npm run gate          # 渲染双板 → verify-board → 25 套测试，逐项报耗时，任一失败 exit 1
+npm test              # = gate --fast，跳掉 11 项慢的、实跑 14 项（约 188s，改完随手跑这个）
 node scripts/gate.mjs --list            # 看登记了哪些套件
 node scripts/gate.mjs --only workbench  # 只跑名字含 workbench 的
 ```
