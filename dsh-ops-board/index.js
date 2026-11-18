@@ -84,6 +84,9 @@ const START_TIMEOUT_MS = 25000
 const STATE_TTL_MS = 800
 const LOG_LINES = 40
 const MAX_BODY = 2 * 1024 * 1024
+// 每个「看板 + 作用域」最多记住多少个聊过的会话，供看板「选择对话」列出来。
+// 留 20 个够回溯，又不至于让 sessions.json 无限长。
+const SESSION_HISTORY_MAX = 20
 
 /* ─────────────────────────── tiny HTTP helpers ─────────────────────────── */
 
@@ -662,7 +665,36 @@ class BoardController {
    */
   readSessionMap() {
     const data = readJson(this.sessionFile)
-    return data && typeof data === 'object' && !Array.isArray(data) ? data : {}
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
+    // 老记录的叶子值可能是纯字符串会话 id；统一归normalize 成 {id, title?}，
+    // 让前端不用区分新旧两种形态。
+    const out = {}
+    for (const board of Object.keys(data)) {
+      const perBoard = data[board]
+      if (!perBoard || typeof perBoard !== 'object' || Array.isArray(perBoard)) continue
+      const normalized = {}
+      for (const key of Object.keys(perBoard)) {
+        const entry = perBoard[key]
+        if (typeof entry === 'string' && entry !== '') normalized[key] = { id: entry, history: [{ id: entry, title: '' }] }
+        else if (entry && typeof entry === 'object' && typeof entry.id === 'string' && entry.id !== '') {
+          const rec = { id: entry.id, ...(typeof entry.title === 'string' && entry.title !== '' ? { title: entry.title } : {}) }
+          // history 是这个作用域聊过的会话列表（最近的在前）。老记录没有这个字段，
+          // 就用它那条 id 补一个，前端拿到的形状始终一致，不用分支判断。
+          const list = Array.isArray(entry.history) ? entry.history : []
+          const clean = []
+          for (const h of list) {
+            if (!h || typeof h.id !== 'string' || h.id === '') continue
+            clean.push({ id: h.id, title: typeof h.title === 'string' ? h.title : '', at: Number(h.at) || 0 })
+          }
+          if (clean.length === 0) clean.push({ id: entry.id, title: rec.title || '', at: 0 })
+          // 保证「最近用的那条」一定在列表里，否则下拉里会漏掉正在用的会话
+          if (!clean.some((h) => h.id === entry.id)) clean.unshift({ id: entry.id, title: rec.title || '', at: 0 })
+          normalized[key] = { ...rec, history: clean.slice(0, SESSION_HISTORY_MAX) }
+        }
+      }
+      if (Object.keys(normalized).length > 0) out[board] = normalized
+    }
+    return out
   }
 
   writeSessionMap(map) {
@@ -676,14 +708,41 @@ class BoardController {
     }
   }
 
-  setSession(board, key, sessionId) {
+  setSession(board, key, sessionId, title) {
     const map = this.readSessionMap()
     const boardId = String(board || '').trim()
     const itemKey = String(key || '').trim()
     if (!boardId || !itemKey) return map
     if (!map[boardId]) map[boardId] = {}
-    if (sessionId) map[boardId][itemKey] = String(sessionId)
-    else delete map[boardId][itemKey]
+    // 会话记录存 {id, title, history}：
+    //   id/title  = 最近用的那个（老代码仍按这个读，保持兼容）
+    //   history   = 这个作用域下聊过的会话，最近的在前，供看板「选择对话」列出来
+    //
+    // 以前只存一个 id，于是「继续上次」只能有一个选项 —— 想回到更早的那次对话
+    // 就没路可走，只能去 Harness 的会话列表里翻。多记一份 history 才谈得上"选"。
+    const prev = map[boardId][itemKey] || {}
+    const cleanTitle = typeof title === 'string' && title.trim() !== '' ? title.trim() : ''
+    if (sessionId) {
+      const sid = String(sessionId)
+      const history = Array.isArray(prev.history) ? prev.history.slice() : prev.id ? [{ id: String(prev.id), title: prev.title || '' }] : []
+      const at = Date.now()
+      const existing = history.findIndex((h) => h && h.id === sid)
+      const entry = {
+        id: sid,
+        // 没传标题就沿用这条会话以前记下的，别把好标题冲成空
+        title: cleanTitle || (existing > -1 ? history[existing].title || '' : ''),
+        at,
+      }
+      if (existing > -1) history.splice(existing, 1)
+      history.unshift(entry)
+      map[boardId][itemKey] = {
+        id: sid,
+        ...(entry.title ? { title: entry.title } : {}),
+        history: history.slice(0, SESSION_HISTORY_MAX),
+      }
+    } else {
+      delete map[boardId][itemKey]
+    }
     if (Object.keys(map[boardId]).length === 0) delete map[boardId]
     this.writeSessionMap(map)
     return map
@@ -1203,7 +1262,7 @@ function createHandler(controller, hub) {
       if (pathname === `${ROUTE}/sessions` && req.method === 'POST') {
         if (!sameOrigin(req)) return sendJson(res, 403, { ok: false, error: 'untrusted origin' })
         const body = JSON.parse((await readBody(req)).toString('utf8') || '{}')
-        const sessions = controller.setSession(body.board, body.key, body.sessionId)
+        const sessions = controller.setSession(body.board, body.key, body.sessionId, body.title)
         return sendJson(res, 200, { ok: true, sessions })
       }
 
@@ -1227,6 +1286,9 @@ function createHandler(controller, hub) {
           item: String(body.item || ''),
           title: String(body.title || ''),
           fresh: Boolean(body.fresh),
+          reuseSessionId: String(body.reuseSessionId || ''),
+          askId: String(body.askId || ''),
+          surface: String(body.surface || 'page'),
           question,
         })
         return sendJson(res, 200, { ok: true, listeners: hub.size })

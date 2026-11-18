@@ -23,7 +23,6 @@ import {
   laneByKey,
   stageOfStatus,
   itemsOfLane,
-  countOfLane,
   openCountOfLane,
   isClosedLaneItem,
   sortItems,
@@ -38,12 +37,12 @@ import {
   stageBoard,
   legend,
   historyList,
-  highlights,
-  actionsList,
   openIndexLines,
   askOff,
 } from "./lib/parts.mjs";
 import { boardContext } from "./lib/context.mjs";
+// buildFlow 曾用于渲染工作流画布。画布 2026-11-18 去掉，工作流页同日删除，
+// 渲染器已不再需要它（serve.mjs 仍在用它算 API 的并行/冲突）。
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_ROOT = resolve(HERE, "..");
@@ -197,32 +196,19 @@ function topbar(config, ledger) {
   <div class="topbar-right">
     <span>更新 ${esc(fmtDate(ledger.updatedAt))}</span>
     <div class="theme-picker">${swatches}</div>
+    <button class="topbar-btn" type="button" id="export-open" title="导出日报 / 周报 / 月报">导出</button>
+    <button class="topbar-btn" type="button" id="finder-open" title="搜这块板（Ctrl+F）">搜索</button>
+    <button class="topbar-btn" type="button" id="settings-open" title="看板设置">设置</button>
   </div>
 </div>`;
 }
 
 function masthead(config, ledger) {
-  const ears = config.lanes.slice(0, 2).map((lane) => {
-    const items = itemsOfLane(ledger, lane.key);
-    const openN = openCountOfLane(lane, items);
-    return {
-      lane,
-      items: items.length,
-      openN,
-      closedN: items.length - openN,
-    };
-  });
-
-  const earHtml = (e, side) =>
-    e
-      ? `<div class="ears ${side}"><span>${esc(e.lane.label)}</span><b>${e.items} 项</b><em>${esc(e.lane.openNoun)} ${e.openN} · 已收口 ${e.closedN}</em></div>`
-      : "";
-
+  // 报头两侧的统计耳朵（「问题 N 项 / 未收口 M · 已收口 K」）去掉了，
+  // 用户要更干净的头部：只留项目名和副标题。
   return `<header class="masthead">
-  ${earHtml(ears[0], "left")}
   <h1>${esc(ledger.project.name)}</h1>
   <div class="en">${esc(ledger.project.subtitle || "")}</div>
-  ${earHtml(ears[1], "right")}
 </header>`;
 }
 
@@ -301,8 +287,7 @@ function viewSkills(config, ledger) {
   <div class="details-main">
     <div class="kicker">Skill 统计 · ${esc(config.labels.skillsTitle || "Agent 用过的与产出的")}</div>
     <h1 class="details-title">Skill 台账</h1>
-    <p class="deck">这个项目的 Skill 从三个地方来：Harness 会话里真的调用过的、项目自己产出的、以及专门为它写的。${data && data.updatedAt ? `统计于 ${relTime(data.updatedAt)}。` : "还没有统计过。"}</p>
-    <p class="rail-note">项目目录：${data && data.project ? `<code>${esc(data.project)}</code>` : "未登记"}${data && data.projectNames && data.projectNames.length ? ` · 别名：${esc(data.projectNames.join(" / "))}` : ""}</p>
+    <p class="rail-note">项目目录：${data && data.project ? `<code>${esc(data.project)}</code>` : "未登记"}${data && data.projectNames && data.projectNames.length ? ` · 别名：${esc(data.projectNames.join(" / "))}` : ""}${data && data.updatedAt ? ` · 统计于 ${relTime(data.updatedAt)}` : " · 还没有统计过"}</p>
     <section class="issue-section">
       <div class="section-head"><h2>问 AI</h2><span>先选动作，再点「发送」${askOff(config) ? "" : '<button class="btn btn-ask head-ask" type="button" data-ask-skills>问整页 Skill</button>'}</span></div>
       <p class="stage-empty" style="border:0;padding:0">这一页的每条 skill 旁边也有「问 AI」；点哪条就围绕哪条问，点上面这个按钮则针对整页。</p>
@@ -335,36 +320,69 @@ function viewSkills(config, ledger) {
 }
 
 function viewOverview(config, ledger) {
-  const laneTables = config.lanes
+  // 想看的 lane：问题、风险单独成块（只列未收口）；其余 lane（如需求）留在下方一览。
+  // 「风险一览」提到问题下面；问题 / 风险一览由各自「待处理」块取代，不再单独重复。
+  const openOfLane = (lane, items) => {
+    const openStages = lane.stages.filter((s) => s.open);
+    return items.filter((i) => openStages.some((s) => s.statuses.includes(i.status)));
+  };
+
+  const laneByKey = (key) => config.lanes.find((l) => l.key === key) || null;
+  const bugLane = laneByKey("bug");
+  const riskLane = laneByKey("risk");
+  // 「需求」一览已移去「已修复 / 已关闭 / 暂停」页当第一个模块（叫「已解决」）——
+  // 需求是整体收口/上线的条目，归收口页更贴切，总览不再重复铺它的整表。
+  const restLanes = config.lanes.filter((l) => l.key !== "bug" && l.key !== "risk" && l.key !== "feature");
+
+  // 待处理问题 / 待处理风险：用表格样式。
+  // headAsk 是这一块标题右侧的入口按钮：问题块给「总结项目状态」（整本台账作用域），
+  // 风险块给「风险审核」（只审风险这个车道）。
+  const pendingSection = (lane, title, emptyText, headAsk) => {
+    if (!lane) return "";
+    const items = sortItems(lane, openOfLane(lane, itemsOfLane(ledger, lane.key)));
+    const body = items.length
+      ? itemTable(config, lane, items)
+      : `<p class="stage-empty">${esc(emptyText)}</p>`;
+    const askBtn = headAsk && !askOff(config)
+      ? `<button class="btn btn-ask head-ask" type="button" ${headAsk.attr}>${esc(headAsk.label)}</button>`
+      : "";
+    return `<section class="issue-section priority-block">
+  <div class="section-head"><h2>${esc(title)}</h2><span>${items.length} 个待处理${askBtn}</span></div>
+  ${body}
+</section>`;
+  };
+
+  const pendingProblems = pendingSection(bugLane, "待处理问题", "当前没有需要解决的问题。", {
+    attr: "data-ask-global",
+    label: "总结项目状态",
+  });
+  const pendingRisks = pendingSection(riskLane, "待处理风险", "当前没有待处理的风险。", {
+    attr: "data-ask-risks",
+    label: "风险审核",
+  });
+
+  // 「本轮要点」这块去掉了（2026-11-16 用户定）。
+  // 它和别处讲的是同一批事：已上线的东西在「需求一览」的 shipped 条目里，
+  // 线上版本 / 摘要覆盖率 / 定时任务在左栏 metrics 里，要人今天处理的在
+  // 「待处理问题」「待处理风险」里。单独再列一遍只会越积越长，而且它靠人写，
+  // 常年停在上一轮总结的时间点上。
+  // ledger.highlights 字段保留（不动数据），只是不再单独成块。
+
+  const laneTables = restLanes
     .map((lane) => {
       const items = sortItems(lane, itemsOfLane(ledger, lane.key));
       return `<section class="issue-section">
   <div class="section-head"><h2>${esc(lane.label)}一览</h2><span>共 ${items.length} 个 · ${esc(config.labels.overviewHint)}</span></div>
-  ${itemTable(config, lane, items)}
+  ${items.length ? itemTable(config, lane, items) : `<p class="stage-empty">这个车道暂时没有${esc(lane.countNoun)}。</p>`}
 </section>`;
     })
     .join("");
 
-  const hl = (ledger.highlights || []).length
-    ? `<section class="highlights">
-  <div class="subhead"><h3>本轮要点</h3><span>写用户能感知到的结果</span></div>
-  ${highlights(ledger)}
-</section>`
-    : "";
-
   return `<section class="view" data-view="overview" id="${viewId("overview")}">
   <div class="main-col">
-    <div class="lead">
-      <div class="kicker">本轮结论</div>
-      <h1>${esc(ledger.headline || "")}</h1>
-      ${ledger.deck ? `<p class="deck">${esc(ledger.deck)}</p>` : ""}
-      ${ledger.conclusion ? `<div class="lead-copy"><p>${esc(ledger.conclusion)}</p></div>` : ""}
-    </div>
-    ${hl}
-    <section class="issue-section">
-      <div class="section-head"><h2>${esc(config.priority.label)}</h2><span>按严重度取前 ${config.priority.limit} 条${askOff(config) ? "" : '<button class="btn btn-ask head-ask" type="button" data-ask-global>问整本台账</button>'}</span></div>
-      ${actionsList(config, ledger)}
-    </section>
+    ${wbMount()}
+    ${pendingProblems}
+    ${pendingRisks}
     ${laneTables}
     <div class="history" data-history-section>
       <div class="section-head"><h2>${esc(config.labels.historyTitle)}</h2><span class="history-sub" data-default="共 ${(ledger.history || []).length} 条 · 最近的在下" aria-live="polite">共 ${(ledger.history || []).length} 条 · 最近的在下</span></div>
@@ -382,7 +400,6 @@ function viewLane(config, ledger, lane) {
   <div class="details-main">
     <div class="kicker">${esc(lane.label)}</div>
     <h1 class="details-title">按阶段推进</h1>
-    <p class="deck">共 ${items.length} 个${esc(lane.countNoun)}，${esc(lane.openNoun)} ${openCountOfLane(lane, items)} 个。已收口的在「已修复 / 已关闭 / 暂停」页。</p>
     ${stageBoard(lane, items)}
     ${blocks}
     ${legend(config, lane)}
@@ -396,8 +413,11 @@ function viewLane(config, ledger, lane) {
 
 // 「问题修复」只放还在推进的条目（未收口）；收口的都在这一页，跟原版一样：
 // 原版这一页是「已修复 / 已关闭 / 暂停」，两页的内容互不重叠。
+// 第一个模块「已解决」放需求的收口条目（原本在总览的「需求一览」，改名为「已解决」挪到这里）。
 function viewClosed(config, ledger) {
+  const featureLane = laneByKey(config, "feature");
   const groups = config.lanes
+    .filter((lane) => lane.key !== "feature")
     .map((lane) => {
       const items = sortItems(lane, itemsOfLane(ledger, lane.key).filter((i) => isClosedLaneItem(lane, i)));
       if (!items.length) return "";
@@ -407,18 +427,37 @@ function viewClosed(config, ledger) {
         .join(" · ");
       return `<section class="detail-group" id="stage-${lane.key}-closed">
   <div class="section-head"><h2>${esc(lane.label)} · 已收口</h2><span>${kinds} · 共 ${items.length} 项</span></div>
-  ${items.map((i) => itemCard(config, lane, i)).join("")}
+  ${items.map((i) => itemCard(config, lane, i, { collapsed: true })).join("")}
 </section>`;
     })
     .filter(Boolean)
     .join("");
 
+  // 已解决：需求的收口条目（已上线 / 暂停等已收口阶段），作为第一模块。
+  let solved = "";
+  if (featureLane) {
+    const items = sortItems(featureLane, itemsOfLane(ledger, featureLane.key).filter((i) => isClosedLaneItem(featureLane, i)));
+    if (items.length) {
+      const kinds = featureLane.stages
+        .filter((s) => !s.open)
+        .map((s) => `${esc(s.label)} ${items.filter((i) => s.statuses.includes(i.status)).length}`)
+        .join(" · ");
+      solved = `<section class="detail-group" id="stage-feature-closed">
+  <div class="section-head"><h2>已解决</h2><span>${kinds} · 共 ${items.length} 项</span></div>
+  ${items.map((i) => itemCard(config, featureLane, i, { collapsed: true })).join("")}
+</section>`;
+    }
+  }
+
+  const emptyState = (!solved && !groups) ? `<p class="stage-empty">还没有已收口的条目。</p>` : "";
+
   return `<section class="view" data-view="closed" id="${viewId("closed")}">
   <div class="details-main">
     <div class="kicker">已修复 / 已关闭 / 暂停</div>
     <h1 class="details-title">收口记录</h1>
-    <p class="deck">这些条目已经有实测证据或明确结论，留档备查；「问题修复」页只放还在推进的。</p>
-    ${groups || `<p class="stage-empty">还没有已收口的条目。</p>`}
+    ${solved}
+    ${groups}
+    ${emptyState}
   </div>
 </section>`;
 }
@@ -430,34 +469,327 @@ function aiPanel(config) {
   // 面板只负责「选动作 / 写问题 / 发送」。
   // 接入点、密钥、模型、体检这些都不在这里 —— 那是 Harness 的事，
   // 模板碰了就等于把密钥管理搬进每个项目副本里。
-  return `<aside class="ai-panel" id="ai-panel" aria-label="台账助手">
-  <div class="ai-head">
+  // data-mode / data-pinned 由 client.js 改写。不用 class 表达这两个状态，
+  // 因为它们是「形态」而不是「临时高亮」，挂 data-* 更好读，也不会跟
+  // verify-board 里那份「动态 class 白名单」打架。
+  return `<aside class="ai-panel" id="ai-panel" aria-label="台账助手" data-mode="float" data-pinned="0">
+  <div class="ai-head" id="ai-head">
     <h3>${esc(config.ask.title || "台账助手")}</h3>
     <span class="ctx" id="ai-ctx">整本台账</span>
-    <button type="button" id="ai-new" title="下一条发送新开一个 Harness 会话">新会话</button>
+    <button type="button" class="ai-tool" id="ai-detach" title="把这个对话窗弹成独立窗口，盖在整个 Harness 上面">弹窗</button>
+    <button type="button" class="ai-tool" id="ai-pin" aria-pressed="false" title="置顶：盖在搜索和设置上面">置顶</button>
+    <button type="button" class="ai-tool" id="ai-float-toggle" title="在浮窗和右侧停靠之间切换">停靠</button>
     <button type="button" id="ai-close" aria-label="关闭">×</button>
   </div>
-  <div class="ai-msgs" id="ai-msgs"></div>
-  <div class="ai-quick" id="ai-quick"></div>
-  <div class="ai-compose">
-    <textarea id="ai-input" placeholder="选一个动作，或直接写你要它做的事"></textarea>
-    <div class="send-row">
-      <span class="send-hint" id="ai-hint"></span>
-      <button class="btn-send" type="button" id="ai-send">发送</button>
+  <div class="ai-session" id="ai-session">
+    <label class="ai-mode">
+      <input type="radio" name="ai-mode" value="new" id="ai-mode-new" checked />
+      <span>新对话</span>
+    </label>
+    <label class="ai-mode">
+      <input type="radio" name="ai-mode" value="reuse" id="ai-mode-reuse" />
+      <span>选择对话</span>
+    </label>
+    <select id="ai-pick" title="选一个聊过的对话继续" disabled>
+      <option value="">（还没有聊过的对话）</option>
+    </select>
+  </div>
+  <div class="ai-body" id="ai-body">
+    <div class="ai-msgs" id="ai-msgs"></div>
+    <div class="ai-split" id="ai-split" role="separator" aria-orientation="horizontal" tabindex="0" aria-label="拖动调整问答与输入的分界"></div>
+    <div class="ai-foot" id="ai-foot">
+      <div class="ai-quick" id="ai-quick"></div>
+      <div class="ai-compose">
+        <textarea id="ai-input" placeholder="选一个动作，或直接写你要它做的事"></textarea>
+        <div class="send-row">
+          <span class="send-hint" id="ai-hint"></span>
+          <button class="btn-send" type="button" id="ai-send">发送</button>
+        </div>
+      </div>
     </div>
   </div>
+  <span class="ai-grip" data-dir="n"></span>
+  <span class="ai-grip" data-dir="s"></span>
+  <span class="ai-grip" data-dir="w"></span>
+  <span class="ai-grip" data-dir="e"></span>
+  <span class="ai-grip" data-dir="nw"></span>
+  <span class="ai-grip" data-dir="ne"></span>
+  <span class="ai-grip" data-dir="sw"></span>
+  <span class="ai-grip" data-dir="se"></span>
 </aside>`;
+}
+
+// ────────────────────────── 搜索 / 设置浮层 ──────────────────────────
+
+function overlays(config) {
+  // 搜索这层是自己写的，不用浏览器自带的 Ctrl+F。
+  // 整本台账是一个文件里的 6 个视图，看不见的视图和 AI 面板的字都还在 DOM 里，
+  // 自带查找会命中一堆当前根本看不到的东西，也没法「跳到某条」。
+  // 结果区留空，由 client.js 按 D.items 填。
+  const viewOpts = (config.views || [])
+    .map((v) => `<option value="${esc(v.key)}">${esc(v.label)}</option>`)
+    .join("");
+
+  return `<div class="finder" id="finder" role="dialog" aria-modal="false" aria-label="搜索台账">
+  <div class="finder-head">
+    <input class="finder-input" type="search" id="finder-input" placeholder="搜条目：编号 / 标题 / 正文 / 证据 / 领域" autocomplete="off" spellcheck="false" />
+    <span class="finder-count" id="finder-count"></span>
+    <button class="finder-close" type="button" id="finder-close" aria-label="关闭搜索">×</button>
+  </div>
+  <p class="finder-hint" id="finder-hint">Enter 打开第一条 · Esc 关闭 · Ctrl+F 随时唤出</p>
+  <div class="finder-results" id="finder-results"></div>
+</div>
+<div class="settings" id="settings" role="dialog" aria-modal="true" aria-label="看板设置">
+  <div class="settings-box">
+    <div class="settings-head">
+      <h3>看板设置</h3>
+      <span>改完立刻生效 · 只影响这台机器</span>
+      <button class="settings-close" type="button" id="settings-close" aria-label="关闭设置">×</button>
+    </div>
+    <div class="settings-body">
+
+      <div class="settings-row">
+        <span class="settings-label">主题</span>
+        <div class="settings-ctl">
+          <div class="settings-seg" id="set-theme">
+            <button type="button" data-value="night">夜晚</button>
+            <button type="button" data-value="eye">护眼</button>
+            <button type="button" data-value="paper">纸面</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">正文字号</span>
+        <div class="settings-ctl">
+          <div class="settings-seg" id="set-font">
+            <button type="button" data-value="15">小</button>
+            <button type="button" data-value="16">标准</button>
+            <button type="button" data-value="17.5">大</button>
+            <button type="button" data-value="19">特大</button>
+          </div>
+        </div>
+        <p class="settings-note">只放大正文与正文段落，卡片上的编号、时间、按钮字号保持不变，密排的索引行不会被撑散。</p>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">侧栏</span>
+        <div class="settings-ctl">
+          <div class="settings-seg" id="set-rail">
+            <button type="button" data-value="0">展开</button>
+            <button type="button" data-value="1">收起</button>
+          </div>
+          <span class="settings-note">快捷键 [ 也能切换。</span>
+        </div>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">打开哪一页</span>
+        <div class="settings-ctl">
+          <select class="settings-select" id="set-view">
+            <option value="">跟着上次停留的位置</option>
+            ${viewOpts}
+          </select>
+        </div>
+        <p class="settings-note">默认沿用上次看到的页面；只有还没有任何停留记录时，才用这里选的页兜底。</p>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">搜索范围</span>
+        <div class="settings-ctl">
+          <select class="settings-select" id="set-scope">
+            <option value="all">全部字段</option>
+            <option value="title">只搜标题与编号</option>
+            <option value="body">标题 + 正文</option>
+          </select>
+        </div>
+        <p class="settings-note">全部字段 = 编号、标题、四个正文块、证据、领域。</p>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">搜索选项</span>
+        <div class="settings-ctl">
+          <label class="settings-check"><input type="checkbox" id="set-evidence" /> 结果里带证据命中</label>
+          <label class="settings-check"><input type="checkbox" id="set-hotkey" /> 用 Ctrl+F 唤出搜索</label>
+        </div>
+        <p class="settings-note">关掉 Ctrl+F 后仍可点顶栏「搜索」；浏览器自带的查找也会恢复。</p>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">本机偏好</span>
+        <div class="settings-ctl">
+          <button class="settings-btn" type="button" id="set-reset">恢复默认</button>
+          <button class="settings-btn is-danger" type="button" id="set-clear">清空本机偏好</button>
+        </div>
+        <p class="settings-note" id="set-note">恢复默认只把上面几项调回出厂值；清空会连主题、侧栏、上次落点、AI 对话一起丢掉，只保留台账本身。</p>
+      </div>
+
+    </div>
+  </div>
+</div>
+<div class="settings" id="exporter" role="dialog" aria-modal="true" aria-label="导出报表">
+  <div class="settings-box">
+    <div class="settings-head">
+      <h3>导出报表</h3>
+      <span>生成文件 · 可直接发出去</span>
+      <button class="settings-close" type="button" id="export-close" aria-label="关闭导出">×</button>
+    </div>
+    <div class="settings-body">
+
+      <div class="settings-row">
+        <span class="settings-label">报表</span>
+        <div class="settings-ctl">
+          <div class="settings-seg" id="exp-mode">
+            <button type="button" data-value="daily">日报</button>
+            <button type="button" data-value="weekly">周报</button>
+            <button type="button" data-value="monthly">月报</button>
+            <button type="button" data-value="all">全量</button>
+          </div>
+        </div>
+        <p class="settings-note" id="exp-span">日报 = 1 天，周报 = 7 天，月报 = 30 天。区间按各块板自己台账的「更新时间」往前推，不用今天的日期 —— 台账停在哪天，就从哪天往回数。</p>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">看板</span>
+        <div class="settings-ctl">
+          <div class="exp-boards" id="exp-boards">
+            <p class="settings-note">正在读取看板列表…</p>
+          </div>
+        </div>
+        <p class="settings-note">默认只勾当前这块板。勾多块时，下面的「合并 / 分开」决定怎么出。</p>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">输出</span>
+        <div class="settings-ctl">
+          <div class="settings-seg" id="exp-merge">
+            <button type="button" data-value="merged">合并成一份</button>
+            <button type="button" data-value="split">各项目分开</button>
+          </div>
+        </div>
+        <p class="settings-note">合并 = 开头带一张跨项目总表，适合整体汇报；分开 = 每个项目一份文件，适合分头发给不同的人。</p>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">导出格式</span>
+        <div class="settings-ctl">
+          <label class="settings-check"><input type="checkbox" id="exp-f-md" /> Markdown</label>
+          <label class="settings-check"><input type="checkbox" id="exp-f-html" /> 网页</label>
+          <label class="settings-check"><input type="checkbox" id="exp-f-txt" /> 纯文本</label>
+        </div>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label">保存到</span>
+        <div class="settings-ctl">
+          <input class="settings-select exp-path" id="exp-out" type="text" spellcheck="false" placeholder="留空则用看板目录下的 reports\\" />
+          <button class="settings-btn exp-pick" type="button" id="exp-pick" title="选一个文件夹">浏览…</button>
+          <button class="settings-btn exp-pick" type="button" id="exp-reset" title="改回默认位置">默认</button>
+        </div>
+        <p class="settings-note">留空会存到这块看板自己目录下的 <code>reports\</code> 里；也可以点「浏览…」选别处。导完下面会列出完整路径。</p>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-label"></span>
+        <div class="settings-ctl">
+          <button class="settings-btn exp-go" type="button" id="exp-go">生成报表</button>
+          <span class="exp-status" id="exp-status"></span>
+        </div>
+      </div>
+
+      <div class="exp-result" id="exp-result"></div>
+
+    </div>
+  </div>
+</div>`;
+}
+
+// ────────────────────────── 工作台 ──────────────────────────
+//
+// 这里以前是「可视化工作流」画布（绝对定位节点 + SVG 箭头 + 拖拽平移）。
+// 2026-11-18 用户定：画布去掉，工作流页只剩工作台。
+//
+// 工作台本体：选卡 → 选串/并行 → 机器自动逐张分析。见 client.js 的 workbench。
+//
+// ⚠️ 整站只有这一份（单实例）。它带运行状态（WB.run / order / 执行进度），
+// 如果每个视图各渲染一份，querySelector('[data-workbench]') 会取到先出现的那份，
+// 另一份就成了永远不动的死壳。所以渲染一次、按当前视图「搬」过去：
+//   · 输出里每个想放工作台的视图都留一个 [data-wb-mount] 空位；
+//   · 初始放在第一个挂载点（总览页顶部，见 viewOverview）；
+//   · client.js 的 show() 切视图时把整个节点 appendChild 到目标挂载点。
+// 节点搬家不会丢事件/状态（同一个 DOM 节点），只是换了父元素。
+function workbenchBlock() {
+  return `<div class="workbench" data-workbench>
+  <div class="workbench-head">
+    <h3>工作台</h3>
+    <span class="workbench-desc">拖动卡片排出执行顺序（上面先做）→ 选串行还是并行 → 点「分析」→ 确认后「开始」。机器逐张领活、交给 Harness、取回结论后自动交还推进。</span>
+  </div>
+  <div class="workbench-controls">
+    <div class="workbench-pool" data-wb-pool>
+      <!-- 卡片候选池：拖拽排序的执行队列，由 client.js 依据 plan 动态铺 -->
+    </div>
+    <div class="workbench-mode">
+      <label class="wb-mode-option"><input type="radio" name="wb-mode" value="serial" checked> 串行（一次一件，每张有建议顺序）</label>
+      <label class="wb-mode-option"><input type="radio" name="wb-mode" value="parallel"> 并行（拆成多行队列，每路同时推进）</label>
+    </div>
+    <div class="workbench-batch" data-wb-batch>
+      <span class="wb-batch-label">一次喂几张给 Agent 自主处理：</span>
+      <select class="wb-batch-size" data-wb-batch-size>
+        <option value="1" selected>每批 1 张（一张一张来）</option>
+        <option value="2">每批 2 张</option>
+        <option value="3">每批 3 张</option>
+        <option value="5">每批 5 张</option>
+        <option value="-1">整批全交（一次全给它）</option>
+      </select>
+    </div>
+    <div class="workbench-actions">
+      <button type="button" class="btn" data-wb-analyze>分析</button>
+      <button type="button" class="btn" data-wb-start disabled>开始执行</button>
+      <button type="button" class="btn" data-wb-stop disabled>停止</button>
+      <button type="button" class="btn" data-wb-clear>清空</button>
+    </div>
+  </div>
+  <div class="workbench-run" data-wb-run hidden>
+    <div class="workbench-run-head">
+      <span class="wb-run-phase" data-wb-phase>—</span>
+      <span class="wb-run-progress" data-wb-progress></span>
+    </div>
+    <ol class="workbench-steps" data-wb-steps></ol>
+  </div>
+</div>`;
+}
+
+// 工作台的挂载点：想放工作台的视图里留个空位，工作台节点会被搬进来。
+// 2026-11-18：工作流页按用户要求删掉了，现在唯一落点是总览页顶部。
+// 保留这套「挂载点」机制而不是把工作台直接写死进总览页，是因为：
+//   ① 以后想把工作台放到别的页（或再加一页），只加个 wbMount() 就行；
+//   ② 单实例搬移的语义不依赖具体页面。
+function wbMount() {
+  return `<div class="wb-mount" data-wb-mount></div>`;
 }
 
 // ────────────────────────── 组装 ──────────────────────────
 
 function buildHtml(config, ledger) {
+  // 工作台只渲染一份，注入到第一个 [data-wb-mount]（现在只有总览页有挂载点）。
+  // 其它视图若以后加了挂载点，初始留空，由 client.js 切过去时把节点搬进来。
+  let wbInjected = false;
+  const withWorkbench = (html) =>
+    html.replace(/<div class="wb-mount" data-wb-mount><\/div>/, () => {
+      if (wbInjected) return wbMount();
+      wbInjected = true;
+      return wbMount().replace("></div>", ">" + workbenchBlock() + "</div>");
+    });
+
   const views = (config.views || [])
     .map((v) => {
-      if (v.kind === "overview") return viewOverview(config, ledger);
+      if (v.kind === "overview") return withWorkbench(viewOverview(config, ledger));
       if (v.kind === "lane") return viewLane(config, ledger, laneByKey(config, v.lane));
       if (v.kind === "closed") return viewClosed(config, ledger);
       if (v.kind === "skills") return viewSkills(config, ledger);
+      // kind:"flow" 的视图已随「工作流」页一起删掉（2026-11-18）。
+      // 这里不再有 flow 分支：老配置若还写着 flow，会渲染成空字符串，
+      // verify-board 的「views 与导航一致」那条会立刻报出来，不会静默消失。
       return "";
     })
     .join("\n");
@@ -479,6 +811,7 @@ function buildHtml(config, ledger) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)}</title>
+<script>try{if(/[?&]chat=1(?:&|$)/.test(location.search))document.documentElement.setAttribute("data-chat","1")}catch(e){}</script>
 <style>${buildCss()}</style>
 </head>
 <body>
@@ -496,6 +829,7 @@ ${views}
 </div>
 </div>
 ${aiPanel(config)}
+${overlays(config)}
 <script type="application/json" id="board-data">${boardData}</script>
 <script>${clientJs}</script>
 </body>

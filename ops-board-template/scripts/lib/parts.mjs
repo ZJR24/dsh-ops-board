@@ -2,6 +2,8 @@
 // 这里只做"翻译"，不做业务判断；所有可变的部分都从 board.config.json 读。
 // 类名与 css.mjs 一一对应（照报纸体例）。
 
+import { firstPath } from "./evidence-path.mjs";
+
 const EV_KIND_LABEL = {
   command: "命令",
   file: "文件",
@@ -269,7 +271,21 @@ export function railSnapshotPanel(config, ledger) {
 
 // ── 条目卡片 ──
 
-export function itemCard(config, lane, item) {
+// 给「文件」类证据生成 data 属性。认不出路径就返回空串（退回纯文本）。
+function evLookFile(text) {
+  const p = firstPath(text);
+  if (!p) return "";
+  return `data-look="file" data-path="${esc(p)}" data-hint="${esc(text)}"`;
+}
+
+// 「提交」类证据同理，取第一段 7~40 位的十六进制。
+function evLookCommit(text) {
+  const m = String(text || "").match(/\b[0-9a-f]{7,40}\b/i);
+  if (!m) return "";
+  return `data-look="commit" data-hash="${esc(m[0])}"`;
+}
+
+export function itemCard(config, lane, item, { collapsed = false, collapsible = false } = {}) {
   const tone = toneOfItem(lane, item);
   const sections = (item.sections || [])
     .map((s) => `<section><h4>${esc(s.label)}</h4><p>${esc(s.text)}</p></section>`)
@@ -279,11 +295,54 @@ export function itemCard(config, lane, item) {
     .map((e) => {
       const kind = typeof e === "string" ? "value" : e.kind || "value";
       const text = typeof e === "string" ? e : e.text;
+      // 文件 / 提交这两类能直接查到东西，做成可点的；
+      // 其余（实测值、链接、命令）保持纯文本，点了也没处去。
+      const look =
+        kind === "file" ? evLookFile(text) : kind === "commit" ? evLookCommit(text) : null;
+      if (look) {
+        return `<li><span class="ev-kind">${esc(EV_KIND_LABEL[kind] || kind)}</span><button class="ev-text ev-look" type="button" ${look} title="点一下看现在是什么样">${esc(text)}</button></li>`;
+      }
       return `<li><span class="ev-kind">${esc(EV_KIND_LABEL[kind] || kind)}</span><span class="ev-text">${esc(text)}</span></li>`;
     })
     .join("");
 
   const metaBits = [item.area, fmtDate(item.updatedAt)].filter(Boolean).map(esc).join(" · ");
+
+  const cardBody = `<div class="sections">${sections}</div>
+  ${ev ? `<div class="evidence"><b>证据</b><ul>${ev}</ul></div>` : ""}
+  <div class="card-acts">
+    ${askOff(config) ? "" : `<button class="btn btn-ask" type="button" data-ask="${esc(item.id)}">问 AI</button>`}
+    <button class="btn" type="button" data-copy="${esc(item.id)}">${esc(config.labels.copyButton)}</button>
+  </div>`;
+
+  // 已收口页：默认收起，只露标题行；点一下才展开内容。
+  // 用原生 <details>/<summary>，不用 JS，默认折叠、点击展开。
+  if (collapsed) {
+    return `<details class="card card-collapsed lv-${tone}" id="${esc(item.id)}">
+  <summary>
+    <span class="id">${esc(item.id)} ${severityChip(lane, item)} ${statusChip(lane, item)}</span>
+    <span class="meta">${metaBits}</span>
+    <h3>${esc(item.title)}</h3>
+  </summary>
+  ${cardBody}
+</details>`;
+  }
+
+  // 车道页（新增功能 / 问题修复 / 风险）：同样能收起来，但默认展开。
+  // 默认开是刻意的 —— 这三页是干活的地方，进来就该看见内容；
+  // 给收起是为了条目多的时候能一行行扫过去，不必滚过每张卡的正文。
+  // 用 <details open> 而不是自己写 JS 记状态：浏览器自己管，
+  // 也不会因为脚本没跑到就退化成打不开。
+  if (collapsible) {
+    return `<details class="card card-open lv-${tone}" id="${esc(item.id)}" open>
+  <summary>
+    <span class="id">${esc(item.id)} ${severityChip(lane, item)} ${statusChip(lane, item)}</span>
+    <span class="meta">${metaBits}</span>
+    <h3>${esc(item.title)}</h3>
+  </summary>
+  ${cardBody}
+</details>`;
+  }
 
   return `<article class="card lv-${tone}" id="${esc(item.id)}">
   <div class="card-head">
@@ -291,12 +350,7 @@ export function itemCard(config, lane, item) {
     <span class="meta">${metaBits}</span>
   </div>
   <h3>${esc(item.title)}</h3>
-  <div class="sections">${sections}</div>
-  ${ev ? `<div class="evidence"><b>证据</b><ul>${ev}</ul></div>` : ""}
-  <div class="card-acts">
-    ${askOff(config) ? "" : `<button class="btn btn-ask" type="button" data-ask="${esc(item.id)}">问 AI</button>`}
-    <button class="btn" type="button" data-copy="${esc(item.id)}">${esc(config.labels.copyButton)}</button>
-  </div>
+  ${cardBody}
 </article>`;
 }
 
@@ -339,7 +393,7 @@ export function stageBlock(config, lane, stage, items) {
   } else if (!list.length) {
     body = `<p class="stage-empty">这一阶段暂时没有${esc(lane.countNoun)}。</p>`;
   } else {
-    body = list.map((i) => itemCard(config, lane, i)).join("");
+    body = list.map((i) => itemCard(config, lane, i, { collapsible: true })).join("");
   }
 
   return `<section class="detail-group" id="stage-${lane.key}-${stage.key}">
@@ -447,18 +501,10 @@ export function historyList(entries, onlyPrefixes, options = {}) {
   return `${legend}<ol class="timeline">${items}</ol>`;
 }
 
-export function highlights(ledger) {
-  const hl = ledger.highlights || [];
-  if (!hl.length) return "";
-  const KIND_LABEL = { feature: "功能", fixed: "修复", watch: "观察", risk: "风险", ops: "运维" };
-  const list = hl
-    .map((h) => {
-      const tone = { feature: "info", fixed: "ok", watch: "warn", risk: "danger", ops: "warn" }[h.kind] || "muted";
-      return `<li>${chip(KIND_LABEL[h.kind] || h.kind || "记录", tone)}<span>${esc(h.text)}</span></li>`;
-    })
-    .join("");
-  return `<ul class="highlight-list">${list}</ul>`;
-}
+// 「本轮要点」的渲染函数已删除（2026-11-16）。ledger.highlights 字段还在数据里，
+// 但总览页不再单独列一块 —— 理由见 render.mjs 里 viewOverview 的注释。
+// 别顺手把它加回来：那些内容和「需求一览」的 shipped 条目、左栏 metrics、
+// 「待处理问题 / 风险」重复，且靠人写、不随数据更新。
 
 export function actionsList(config, ledger) {
   const limit = (config.priority && config.priority.limit) || 3;

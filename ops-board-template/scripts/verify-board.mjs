@@ -75,7 +75,6 @@ const body = html.slice(html.indexOf("</style>"));
 for (const [needle, why] of [
   ["4px double", "报头双线"],
   ["repeating-linear-gradient", "纸面纹理"],
-  ["columns:2", "结论双栏"],
   ["4px solid var(--rule2)", "卡片左边框"],
 ]) {
   if (!css.includes(needle)) problems.push(`报纸体例丢了：${why}（找不到 ${needle}）`);
@@ -94,7 +93,28 @@ if (dupIds.length) problems.push(`id 重复：${dupIds.map(([k, n]) => `${k}×${
 if (askOff) {
   if (html.includes('id="ai-panel"')) problems.push("ask.enabled 是 false，但页面还渲染了 AI 面板");
 } else {
-  for (const id of ["ai-ctx", "ai-msgs", "ai-quick", "ai-input", "ai-send", "ai-close", "ai-new"]) {
+  for (const id of [
+    "ai-ctx",
+    "ai-msgs",
+    "ai-quick",
+    "ai-input",
+    "ai-send",
+    "ai-close",
+    // 会话选择：两个单选 + 一个下拉，缺一个面板就没法选新旧会话
+    "ai-mode-new",
+    "ai-mode-reuse",
+    "ai-pick",
+    // 浮窗：标题栏（拖着走）、置顶、停靠、问答分界、上下两块容器。
+    // 缺任何一个，要么拖不动、要么分界拉不了，而且不会有别的地方报错。
+    "ai-head",
+    "ai-pin",
+    "ai-float-toggle",
+    // 弹窗：把它弹到 Harness 外壳层（整个应用窗口）上
+    "ai-detach",
+    "ai-body",
+    "ai-split",
+    "ai-foot",
+  ]) {
     if (!html.includes(`id="${id}"`)) problems.push(`AI 面板缺控件：#${id}`);
   }
 }
@@ -106,6 +126,43 @@ for (const gone of ["ai-config", "cfg-provider", "cfg-key", "detect-list", "ai-m
 // 5. 主题切换要三套
 const swatches = [...html.matchAll(/class="theme-swatch" type="button" data-theme="([^"]+)"/g)].map((m) => m[1]);
 if (swatches.length !== 3) problems.push(`主题按钮应该 3 个，实际 ${swatches.length} 个`);
+
+// 5a. 顶栏的搜索 / 设置入口，以及它们各自那层浮窗的控件。
+//     浮窗是 fixed 定位、盖在页面上的，所以控件缺一个就是「点了没东西」，
+//     不会有别的地方报错，只能在这里盯。
+for (const id of [
+  "finder-open",
+  "settings-open",
+  "finder",
+  "finder-input",
+  "finder-count",
+  "finder-close",
+  "finder-hint",
+  "finder-results",
+  "settings",
+  "settings-close",
+  "set-theme",
+  "set-font",
+  "set-rail",
+  "set-view",
+  "set-scope",
+  "set-evidence",
+  "set-hotkey",
+  "set-reset",
+  "set-clear",
+]) {
+  if (!html.includes(`id="${id}"`)) problems.push(`搜索 / 设置缺控件：#${id}`);
+}
+// 设置里「打开哪一页」必须把 config.views 一页不落地列出来，
+// 否则用户切了默认页却发现某一页根本选不到。
+const viewOptions = [...html.matchAll(/<select class="settings-select" id="set-view">([\s\S]*?)<\/select>/g)]
+  .map((m) => m[1])
+  .join("");
+for (const v of cfg.views || []) {
+  if (!viewOptions.includes(`value="${v.key}"`)) {
+    problems.push(`设置里「打开哪一页」少了「${v.label}」这个选项`);
+  }
+}
 
 // 5b. 侧栏开关：必须是原版那个「竖排在侧栏右边缘、垂直居中」的按钮，
 //     收起后原地变「展开」，侧栏留 50px 窄条。位置参数写死在这里，谁挪都会红。
@@ -201,7 +258,11 @@ for (const t of ["night", "eye", "paper"]) {
 }
 
 // 6. 卡片与锚点
-const cards = [...html.matchAll(/<article class="card[^"]*" id="([^"]+)"/g)].map((m) => m[1]);
+// 普通卡片是 <article class="card">；已收口页的折叠卡片是 <details class="card card-collapsed">，
+// 两者都算「一张卡片」——只数 article 会把折叠卡漏掉，导致与「问 AI」按钮数对不上。
+const cards = [
+  ...html.matchAll(/<(?:article|details) class="card[^"]*" id="([^"]+)"/g),
+].map((m) => m[1]);
 const cardCount = {};
 for (const c of cards) cardCount[c] = (cardCount[c] || 0) + 1;
 const dupCards = Object.entries(cardCount).filter(([, n]) => n > 1);
@@ -216,10 +277,18 @@ const askBtns = (html.match(/data-ask="/g) || []).length;
 const htmlOnly = html.replace(/<script[\s\S]*?<\/script>/g, "");
 if (askOff) {
   const anyAsk =
-    /\bdata-ask(-skill|-skills|-global)?\s*=/.test(htmlOnly) || /\bid="ai-(panel|send|close|new|input)"/.test(htmlOnly);
+    /\bdata-ask(-skill|-skills|-global|-risks)?\s*=/.test(htmlOnly) || /\bid="ai-(panel|send|close|new|input)"/.test(htmlOnly);
   if (anyAsk) problems.push("ask.enabled 是 false，但页面上还留着「问 AI」面板或按钮");
 } else if (askBtns !== cards.length) {
   problems.push(`卡片 ${cards.length} 张，「问 AI」按钮 ${askBtns} 个，数量不一致`);
+}
+
+// 「待处理问题」和「待处理风险」两块头部各有一个入口按钮，左右对称：
+// 问题块 → 总结项目状态（整本台账），风险块 → 风险审核（只审风险车道）。
+// 少了任何一个都是开着 ask 却没给入口，和「按钮比卡片少」一样属于渲染缺件。
+if (!askOff) {
+  if (!/\bdata-ask-global\b/.test(htmlOnly)) problems.push("「待处理问题」右侧缺「总结项目状态」按钮");
+  if (!/\bdata-ask-risks\b/.test(htmlOnly)) problems.push("「待处理风险」右侧缺「风险审核」按钮");
 }
 
 // 6c. Skill 统计是独立一页（不是塞在总览里），三组固定都在。
@@ -250,26 +319,24 @@ if (askOff) {
   }
 }
 
-// 6b. 导航顺序要跟原版网页端一致：总览 → 新增功能 → 问题修复 → [风险] → 已修复 / 已关闭 / 暂停
+// 6b. 导航顺序要跟配置里的 views 顺序一致。
+// 早先这里写死成「总览 → 新增功能 → 问题修复 → 风险 → 已修复 → Skill 统计」，
+// 结果是每加一个新视图就误报一次 —— 它检查的是「有没有按原版排」，
+// 而真正该检查的是「渲染顺序有没有跟着配置走」。改成按配置比对，
+// 既不会因为加视图误报，又能抓到「配置改了但渲染没跟上」这种真错。
 const navLabels = [...html.matchAll(/<nav class="nav">([\s\S]*?)<\/nav>/g)]
   .flatMap((m) => [...m[1].matchAll(/<a[^>]*>([^<]*)<\/a>/g)].map((a) => a[1].trim()));
 if (!navLabels.length) {
   problems.push("找不到导航");
 } else {
-  const rank = (label) => {
-    if (label === "总览") return 0;
-    if (label === "新增功能") return 1;
-    if (label === "问题修复") return 2;
-    if (label === "风险") return 3;
-    if (label.indexOf("已修复") === 0) return 4;
-    if (label === "Skill 统计") return 5;
-    return 9;
-  };
-  const ranks = navLabels.map(rank);
-  const sorted = [...ranks].sort((a, b) => a - b);
-  if (JSON.stringify(ranks) !== JSON.stringify(sorted)) {
-    problems.push(`导航顺序不对：${navLabels.join(" → ")}（应为 总览 → 新增功能 → 问题修复 → 风险 → 已修复 / 已关闭 / 暂停 → Skill 统计）`);
+  const cfgViews = Array.isArray(cfg.views) ? cfg.views : [];
+  if (cfgViews.length) {
+    const want = cfgViews.map((v) => String(v.label || "").trim());
+    if (JSON.stringify(navLabels) !== JSON.stringify(want)) {
+      problems.push(`导航顺序和 board.config.json 的 views 不一致：实际 ${navLabels.join(" → ")}；配置 ${want.join(" → ")}`);
+    }
   }
+  // 这三条跟顺序无关，是「必须存在 / 必须叫这个名」的硬约束，保留。
   if (!navLabels.some((l) => l.indexOf("已修复") === 0)) {
     problems.push("收口页的标签应跟原版一样叫「已修复 / 已关闭 / 暂停」");
   }
@@ -289,13 +356,66 @@ if (dead.length) problems.push(`这些 #链接 找不到落点：${dead.join(", 
 
 // 8. HTML 用到的 class 必须有样式
 const usedClasses = new Set();
-for (const m of body.matchAll(/class="([^"]+)"/g)) {
+for (const m of body.matchAll(/class=["']([^"']+)["']/g)) {
   for (const c of m[1].split(/\s+/)) if (c) usedClasses.add(c);
 }
 const definedClasses = new Set([...css.matchAll(/\.([a-zA-Z][\w-]*)/g)].map((m) => m[1]));
+// 伪类/伪元素、属性选择器里的词不是类名；.a.b 里的 b 是修饰类，仍算类名。
+// 上面那条正则足够宽，但会把 :not(.x) / [data-x=".y"] 里的点也抓进来，
+// 因此这里再剔一遍：只保留「出现在选择器主体里」的。
+const selectorHeads = [...css.matchAll(/(^|})([^{}@]+)\{/g)].map((m) => m[2]);
+const selectorClasses = new Set();
+for (const head of selectorHeads) {
+  // 去掉伪类与属性选择器部分，避免从里面抓到词
+  const cleaned = head.replace(/\[[^\]]*\]/g, "").replace(/::?[\w-]+(\([^)]*\))?/g, "");
+  for (const m of cleaned.matchAll(/\.([a-zA-Z][\w-]*)/g)) selectorClasses.add(m[1]);
+}
 const dynamic = /^(is-open|is-active|on|open|is-collapsed|is-stage-filter|ok|bad)$/;
 const noStyle = [...usedClasses].filter((c) => !definedClasses.has(c) && !dynamic.test(c));
 if (noStyle.length) problems.push(`这些 class 在 CSS 里没有规则：${noStyle.join(", ")}`);
+
+// 8b. 反过来：CSS 里定义了、页面结构与脚本里一个字节都没提到的，就是删功能后留下的死样式。
+// （.lead-copy 就这样躺了很久，因为以前只查单向。）
+//
+// 判据刻意放到最宽：只要类名在 HTML 结构或内联脚本里出现过一次，就放过。
+// 类名常常是运行时拼出来的（"msg msg-" + role）或作为参数传入（paintHistory(x,"is-history")），
+// 静态分析分不清它活没活；宁可漏报，也不能让一条永远误报的检查变成噪声。
+// ⚠️ 必须把 <style> 块排除掉——否则每个类名都能在 CSS 里匹配到自己，检查永远不报。
+const everything = html.slice(html.indexOf("</style>") + "</style>".length);
+// 前缀族：类名由变量拼出，静态只能看到前缀。
+//   msg-    ← "msg msg-" + role（role 取 user / ai）
+//   lv-     ← `lv-${tone}`（tone 由 severity/status 配置给出，合法值随配置变）
+const dynamicPrefixes = ["msg-", "lv-"];
+// 服务于「当前看板没走到的合法出口」的样式，不报。
+//   card-head     ← itemCard 的非折叠形态（两块看板都走 <details>，这个出口暂时没调用者，
+//                   但它是 itemCard 的合法返回分支，不是删功能留下的残骸）
+//   metric-xxx    ← 合法 status 档位由 metricStatuses 声明（默认 ok/warn/danger/muted），
+//                   某块看板没用到的档位仍需保留样式，否则换个看板就会掉配色；
+//                   下面第 8c 条已单独检查「声明的档位都有样式」，这里不重复报。
+const CONDITIONAL = new Set(["card-head", "metric-danger", "metric-muted", "metric-ok", "metric-warn"]);
+// 判活的语料 = 本看板的成品 + 渲染器源码。
+// 只查成品会大量误报：小看板只有十来张卡、走不到 timeline / skill 那些分支，
+// 于是它们全被当成死样式。真正该问的是「还有没有代码会拼出这个类名」，
+// 而渲染器是各看板共用的，所以源码必须一起搜。
+const rendererSources = (() => {
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "lib");
+  const files = ["parts.mjs", "client.js", "render.mjs", "css.mjs"];
+  let all = "";
+  for (const f of files) {
+    const p = join(dir, f);
+    if (existsSync(p)) all += readFileSync(p, "utf8");
+  }
+  return all;
+})();
+const corpus = everything + "\n" + rendererSources;
+const orphanClasses = [...selectorClasses].filter((c) => {
+  if (usedClasses.has(c) || dynamic.test(c) || CONDITIONAL.has(c)) return false;
+  if (dynamicPrefixes.some((p) => c.startsWith(p))) return false;
+  // 成品结构与渲染器源码里搜一次：类名作为独立标识出现即视为活
+  const re = new RegExp("(?<![\\w-])" + c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![\\w-])");
+  return !re.test(corpus);
+});
+if (orphanClasses.length) problems.push(`这些样式没有任何元素在用（孤儿样式）：${orphanClasses.join(", ")}`);
 
 // 9. 占位符不能漏到成品里（内联数据里的模板变量是留给前端的，不算）
 const withoutData = html.replace(/<script type="application\/json" id="board-data">[\s\S]*?<\/script>/, "");
@@ -434,8 +554,10 @@ if (!js) {
   for (const gone of ["/api/chat", "/api/config", "/api/health", "/api/detect", 'var BACKEND = "http://127.0.0.1:8790"', "function apiFetch(", "function buildSystem("]) {
     if (js.includes(gone)) problems.push(`前端还留着 Cloud 接入：${gone}（已归 Harness 管）`);
   }
-  // 裸页（没经过 Harness 注入）不能崩，要给一句人看得懂的话
-  for (const fn of ["!HARNESS", "要在 Harness 里打开"]) {
+  // 裸页（没经过 Harness 注入）不能崩，要给一句人看得懂的话。
+  // 判据是「运行时读环境」而不是某个变量名：抓一次存起来的写法在 iframe 先加载、
+  // 插件后注入时会一直读到 null，那才是真的把裸页判断做坏了。
+  for (const fn of ["harnessEnv()", "要在 Harness 里打开"]) {
     if (!js.includes(fn)) problems.push(`前端没有处理裸页：${fn}`);
   }
   // 侧栏能收起 / 能记住状态 / 有快捷键
@@ -481,6 +603,138 @@ if (!js) {
   // 跳转：跨视图要等帧再量位置，落点要高亮，同一锚点连点也要有反应
   for (const fn of ["function nextFrame", "function flashEl", 'closest(\'a[href^="#"]\')']) {
     if (!js.includes(fn)) problems.push(`前端没有 ${fn}，跳转会落不准或点了没反应`);
+  }
+  // 搜索：自己写一层，不用浏览器自带查找（自带查找会命中隐藏视图和 AI 面板里的字，
+  // 也没法按条目跳）。这里盯住「按条目搜 + 分组 + 跳转」这条链不能断。
+  for (const fn of [
+    "function splitBlocks",
+    "function evidenceLines",
+    "function searchItems",
+    "function markInto",
+    "function goItem",
+    "function openFinder",
+    "function closeFinder",
+    "function initFinder",
+    "data-jump",
+  ]) {
+    if (!js.includes(fn)) problems.push(`前端没有 ${fn}，顶栏「搜索」会失效`);
+  }
+  // Ctrl+F 必须能关掉，且关掉后不再拦浏览器自带查找
+  if (!js.includes("prefsNow().hotkey")) {
+    problems.push("前端没有读 hotkey 偏好：Ctrl+F 关不掉，会一直顶着浏览器自带查找");
+  }
+  // 设置：改完立刻生效 + 记得住 + 能恢复默认 / 清空
+  for (const fn of [
+    "function loadPrefs",
+    "function savePrefs",
+    "function applyFont",
+    "function applyTheme",
+    "function paintSettings",
+    "function openSettings",
+    "function closeSettings",
+    "function resetPrefs",
+    "function clearPrefs",
+    "function initSettings",
+    "ops-board-set",
+  ]) {
+    if (!js.includes(fn)) problems.push(`前端没有 ${fn}，顶栏「设置」会失效`);
+  }
+  // 字号只走倍率这一条路：直接改 body 的 px 会把编号、时间、按钮一起撑开，
+  // 密排的索引行就散了。判据是「写的是变量」而不是写死某个字号。
+  if (!js.includes("--fs-scale")) {
+    problems.push("前端字号没有走 --fs-scale 倍率：正文一放大，编号与按钮也会跟着变大");
+  }
+
+  // 13a-2. 浮窗：五件事各要有一条真代码兜着 —— 拖动、拉角、分界、置顶、记住位置。
+  //        这些都是「不报错但用不了」的交互，静态检查必须点名到函数。
+  for (const fn of ["function initFloat", "function applyWin", "function winClamp", "function dragOnce"]) {
+    if (!js.includes(fn)) problems.push(`前端没有 ${fn}，浮窗拖不动 / 记不住位置`);
+  }
+  // 八个方向都得有把手，少一个就有条边拉不了
+  for (const dir of ["n", "s", "w", "e", "nw", "ne", "sw", "se"]) {
+    if (!html.includes(`data-dir="${dir}"`)) problems.push(`浮窗少了 ${dir} 方向的拉伸手柄`);
+  }
+  // 置顶与停靠的按钮必须真的绑了事件，且状态写在 data-* 上
+  if (!js.includes('setAttribute("data-pinned"')) problems.push("置顶状态没写到 data-pinned 上，钉不住");
+  if (!js.includes('setAttribute("data-mode"')) problems.push("浮窗 / 停靠形态没写到 data-mode 上");
+  if (!css.includes('.ai-panel[data-pinned="1"]')) problems.push("CSS 没有置顶态的层级规则，置顶点了没反应");
+  if (!css.includes('.ai-panel[data-mode="dock"]')) problems.push("CSS 没有停靠态的规则，切了不会变回贴边抽屉");
+  // 位置要记在本机，且键名必须在 ops-board- 前缀下，否则「清空本机偏好」扫不掉它
+  if (!js.includes('"ops-board-win:"')) {
+    problems.push("浮窗位置没记在本机（键名应为 ops-board-win:…），关掉再开就回原位了");
+  }
+  if (!js.includes("window.localStorage.setItem(winStoreKey()")) {
+    problems.push("浮窗位置没有落盘");
+  }
+  // 夹回视口的逻辑不能省：拖出屏幕再刷新就再也找不回来了，而且会顶出横向滚动条
+  if (!js.includes("window.innerWidth") || !js.includes("MIN_W")) {
+    problems.push("浮窗没有按视口夹边（拖出屏幕会找不回来）");
+  }
+  // 分界必须能拖，且拖的是输入区高度
+  if (!js.includes("applyFoot")) problems.push("问答分界没有实际调整高度的逻辑");
+  if (!css.includes(".ai-split{") || !css.includes("cursor:row-resize")) {
+    problems.push("问答分界没有可拖的光标，用户看不出来能拉");
+  }
+  if (!css.includes(".ai-grip{")) problems.push("浮窗没有拉伸手柄的样式，八个角是隐形的");
+
+  // 13a-3. 独立窗口形态（?chat=1）：这一份页面被当成「只剩对话框」加载时，
+  //         必须自己把整页骨架收起来、把面板铺满，否则弹出去的窗口里还套着一整页看板。
+  if (!js.includes("initSplit")) {
+    problems.push("分界线逻辑没有抽成 initSplit：独立窗口里没人调 initFloat，分界会拉不动");
+  }
+  // 独立窗口不能再走整页启动流程：finder/settings/路由这些一旦跑起来，
+  // 会把一个空骨架的搜索框、设置页也一起拉起来，而且会覆盖主看板的本机状态。
+  if (!js.includes("CHAT_ONLY")) problems.push("前端没有识别独立窗口形态（缺 CHAT_ONLY 判断）");
+  if (!js.includes('data-chat') && !css.includes('html[data-chat="1"]')) {
+    problems.push("没有 data-chat 标记，页面认不出自己是被当成独立窗口加载的");
+  }
+  // 骨架必须真的藏掉，而且要 !important —— 各段自己的 display 会把它顶回来
+  for (const sel of [".topbar", ".masthead", ".nav", ".layout"]) {
+    if (!css.includes(`html[data-chat="1"] ${sel}`)) {
+      problems.push(`独立窗口形态没有藏掉 ${sel}，窗口里会多出一截看板骨架`);
+    }
+  }
+  if (!/html\[data-chat="1"\][^{]*\{[^}]*display:none!important/.test(css)) {
+    problems.push("独立窗口形态藏骨架时没加 !important，会被各段自身的 display 顶回来");
+  }
+  if (!css.includes('html[data-chat="1"] .ai-panel')) {
+    problems.push("独立窗口形态没有让对话框铺满：窗口里会留一圈空白");
+  }
+  // 铺满必须同时关掉滚动条槽，否则右侧会永远缺一条滚动条的宽度
+  if (!css.includes("scrollbar-gutter:auto")) {
+    problems.push("独立窗口形态没关 scrollbar-gutter，对话框右侧会缺 15px");
+  }
+  // 拉角/置顶/停靠/弹窗在独立窗口里都要收起来：这些是外层窗口的事，
+  // 里面再留一套就是两套定位互相打架。
+  for (const id of ["#ai-pin", "#ai-detach", "#ai-float-toggle"]) {
+    if (!css.includes(`html[data-chat="1"] ${id}`)) {
+      problems.push(`独立窗口里没有收起 ${id}（那是外层窗口的活）`);
+    }
+  }
+  if (!/html\[data-chat="1"\] \.ai-grip[\s\S]{0,200}display:none/.test(css)) {
+    problems.push("独立窗口里没有收起八个拉角");
+  }
+  // 独立窗口里标题栏不能再拖 —— 拖动是外层窗口的职责
+  if (!css.includes('html[data-chat="1"] .ai-head')) {
+    problems.push("独立窗口里标题栏还是可拖的，会和外层窗口的拖动打架");
+  }
+  // 关窗必须走对外通知，不能把面板自己藏掉（它藏了外层窗口还在）
+  if (!js.includes("ops-board/chat-close")) {
+    problems.push("独立窗口的关闭按钮没有通知外层，点了关不掉窗口");
+  }
+  // 弹窗按钮要把「哪一份页面 + 哪一条对话」一起带出去
+  if (!js.includes("ops-board/chat-open")) {
+    problems.push("没有把「弹窗」请求发给外壳层，按钮点了没反应");
+  }
+  if (!js.includes("location.pathname")) {
+    problems.push("弹窗没有带上当前页面的路径，外层不知道要加载哪一块看板");
+  }
+  // 独立窗口里不许写主看板的本机状态：两个 iframe 同源共用同一批键
+  if (!/if \(!CHAT_ONLY\)\s*savePanelState\(true\)/.test(js)) {
+    problems.push("独立窗口会把面板状态写回本机，覆盖主看板正在聊的作用域");
+  }
+  if (!/if \(!CHAT_ONLY\)\s*saveWin\(\)/.test(js)) {
+    problems.push("独立窗口会把浮窗几何写回本机，覆盖主看板的窗口位置");
   }
 }
 

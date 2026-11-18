@@ -5,9 +5,175 @@
   "use strict";
 
   var D = JSON.parse(document.getElementById("board-data").textContent);
+
+  // 同一个页面有两种活法：
+  //   ① 看板整页（默认）—— 顶栏、导航、台账、对话框都在里面；
+  //   ② 只当对话框（?chat=1）—— 被 Harness 用一个独立的小 iframe 单独加载，
+  //      只留对话框本身，位置/大小/置顶由外面那层窗口管。
+  // 判据写在 <html data-chat> 上，由 render.mjs 在 <head> 里最早设好，
+  // 这样 CSS 首帧就生效，不会先闪一下整页再变成对话框。
+  // 用途见 css.mjs 末尾那段 html[data-chat="1"] 规则。
+  var CHAT_ONLY = document.documentElement.getAttribute("data-chat") === "1";
+
+  // 这一份页面是哪个「窗口」。回答是广播回来的（插件那边拿不到发问窗口的引用，
+  // 只能朝所有 iframe 投），所以必须自报家门才能各收各的。
+  // 不区分的话：从独立对话窗提问，主看板那边会因为认不出 askId 而补一条
+  // 「迟到」气泡，同一轮问答在两个窗口各留一份、还各写一遍本地记录。
+  var SURFACE = CHAT_ONLY ? "chat" : "page";
+
+  // 独立窗口里要接着聊哪一条。看板点「弹窗」时把当前作用域一起带过来
+  // （通过 ?scope=），这样窗口里显示的是同一条对话，而不是从空白开始。
+  var CHAT_SCOPE = "";
+  if (CHAT_ONLY) {
+    try {
+      CHAT_SCOPE = new URLSearchParams(location.search).get("scope") || "";
+    } catch (e) {
+      CHAT_SCOPE = "";
+    }
+  }
   // 由 dsh-ops-board 注入：看板 id / 目录 / 项目目录，发送时一并发过去。
   // 这块板的「问 AI」只有一条路 —— 交给 Harness 会话。
-  var HARNESS = window.__OPS_HARNESS__ || null;
+  //
+  // 必须每次现读，不能抓一次存起来：脚本可能在 __OPS_HARNESS__ 注入之前就跑完了
+  // （iframe 先加载、插件后注入），那样存下来的是 null，之后永远读不到，
+  // 面板会一直说「这块板要在 Harness 里打开才能问 AI」。
+  function harnessEnv() {
+    return window.__OPS_HARNESS__ || null;
+  }
+
+  // ── 这个页面现在活在哪儿 ──────────────────────────────────────────
+  //
+  //   ① Harness 面板的 iframe 里：插件是父窗口，postMessage 直连就够；
+  //   ② 系统浏览器窗口里（脱离 Harness 窗口）：源是 http://127.0.0.1:<端口>，
+  //      和插件外壳 dsh-app://app 不同源，postMessage / BroadcastChannel 都过不去。
+  //
+  // ② 这种情况只能借看板自己的 HTTP 服务过河 —— 见 serve.mjs 的 /api/relay/*。
+  // 判断依据是「有没有父窗口」：同一份页面被 iframe 加载时一定有。
+  function inFrame() {
+    try {
+      return !!(window.parent && window.parent !== window);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // 中转的绝对路径。
+  //
+  // 为什么不写相对的 "api/relay/answers"：EventSource 不经过宿主注入的 fetch 改写
+  // （那条改写只认 fetch，且只认 "/api/" 开头），相对路径会解析到错误的地方。
+  // 经 Harness 代理打开时 __OPS_HARNESS__ 里带着看板 id，据此拼出代理前缀；
+  // 由看板服务直接托管时没有这个对象，用根路径。
+  function relayUrl(name) {
+    var env = harnessEnv();
+    if (env && env.id) return "/ops-board/b/" + env.id + "/api/relay/" + name;
+    return "/api/relay/" + name;
+  }
+
+  function relayPost(name, payload) {
+    try {
+      fetch(relayUrl(name), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
+  // 把一条请求交给插件。
+  //
+  // 在 iframe 里就是 postMessage（老路，最快）；在独立窗口里没有父窗口，
+  // 改成 POST 到中转，插件从 /api/relay/reqs 那侧收。
+  function postToHost(payload) {
+    if (inFrame()) {
+      try {
+        window.parent.postMessage(payload, window.location.origin);
+        return true;
+      } catch (e) {
+        // 跨源被拒（理论上不会）时退回中转。
+      }
+    }
+    relayPost("req", payload);
+    return true;
+  }
+
+  // 独立窗口：订阅中转回来的回答 / 回包。
+  //
+  // 收到之后不另写一套分发，直接丢回本页的 message 事件 —— 下面那些
+  // HISTORY_WAIT、会话列表的监听本来就按 message 写，一行都不用改，
+  // 也不会出现「iframe 一套逻辑、独立窗另一套」的分裂。
+  var RELAY_SEEN = {};
+  function startRelay() {
+    if (inFrame()) return;
+    if (typeof EventSource === "undefined") return;
+    var source = new EventSource(relayUrl("answers"));
+    source.onmessage = function (event) {
+      var data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (e) {
+        return;
+      }
+      if (!data || !data.type) return;
+      // 服务端在订阅时会重放最近几条，别把上一轮的回答当新回答再画一遍。
+      var key = String(data.askId || data.reqId || "");
+      if (key) {
+        if (RELAY_SEEN[key]) return;
+        RELAY_SEEN[key] = 1;
+      }
+      try {
+        window.postMessage(data, window.location.origin);
+      } catch (e) {}
+    };
+    // 断开（看板重启、插件重载）时 EventSource 自己会重连，这里不插手。
+    source.onerror = function () {};
+  }
+
+  // ── 浏览器能打开的源 ────────────────────────────────────────────
+  //
+  // 在 Harness 面板里，本页的源是 dsh-app://app —— Electron 的自定义协议，
+  // 只有 Harness 自己认识。拿它去 window.open，系统浏览器打不开。
+  // 真正能交给浏览器的是 Harness 的 HTTP 源，/ops-board/state 的 origin 字段就是。
+  //
+  // 结果要缓存：window.open 必须落在点击的手势里，否则会被当弹窗拦掉；
+  // 而问 origin 是异步的。所以进页面就先把这一问发出去，点的时候直接拿。
+  var HTTP_ORIGIN = "";
+
+  function originUsable(origin) {
+    return /^https?:\/\/[^/]+$/i.test(String(origin || ""));
+  }
+
+  function fetchHttpOrigin(done) {
+    if (HTTP_ORIGIN) return done(HTTP_ORIGIN);
+    // 由看板服务直接托管时（http://127.0.0.1:<端口>/），本页的源本身就能开。
+    if (originUsable(location.origin)) {
+      HTTP_ORIGIN = location.origin;
+      return done(HTTP_ORIGIN);
+    }
+    var settled = false;
+    var finish = function (value) {
+      if (settled) return;
+      settled = true;
+      if (originUsable(value)) HTTP_ORIGIN = String(value).replace(/\/+$/, "");
+      done(HTTP_ORIGIN);
+    };
+    try {
+      fetch("/ops-board/state", { cache: "no-store" })
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (j) {
+          finish(j && j.origin);
+        })
+        .catch(function () {
+          finish("");
+        });
+      setTimeout(function () {
+        finish("");
+      }, 4000);
+    } catch (e) {
+      finish("");
+    }
+  }
 
   // ─────────────────────── 工具 ───────────────────────
 
@@ -32,11 +198,85 @@
 
   // ─────────────────────── 路由 ───────────────────────
 
+  // 记住「上次停在哪」，供页面重新加载时恢复。
+  //
+  // 为什么需要：Harness 面板里的 iframe 会在切走/切回时被整个销毁重建
+  // （React key 变化 + 面板卸载），重挂载时 src 不带 hash。这时 route() 看到
+  // 空 hash 就 show("overview")，用户点了「问 AI」跳去会话、再返回看板，
+  // 就落回总览——明明刚才在看某条 bug。
+  //
+  // 所以把当前视图存进 localStorage，hash 为空时用它兜底。
+  // 存的是 hash 原文（view-xxx / stage-lane / 条目 id 都按原样存），
+  // 恢复时走同一条 route 逻辑，行为与正常点击一致。
+  // 键要按看板分开：所有看板都同源（都走 /ops-board/b/<id>/ 代理），
+  // 共用一个键的话，A 看板的落点会被恢复进 B 看板。用 pathname 做前缀。
+  function routeKey() {
+    var path = "/";
+    try {
+      path = location.pathname || "/";
+    } catch {}
+    return "ops-board-route:" + path;
+  }
+
+  function saveRoute(hash) {
+    try {
+      var clean = String(hash || "").replace(/^#/, "");
+      if (!clean) return; // 空 hash 不覆盖上一次的落点
+      window.localStorage.setItem(routeKey(), clean);
+    } catch {}
+  }
+
+  function restoreRoute() {
+    try {
+      return window.localStorage.getItem(routeKey()) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function forgetRoute() {
+    try {
+      window.localStorage.removeItem(routeKey());
+    } catch {}
+  }
+
   var ITEM_VIEW = {};
   Array.prototype.forEach.call(document.querySelectorAll(".card[id]"), function (c) {
     var view = c.closest(".view");
     if (view) ITEM_VIEW[c.id] = view.dataset.view;
   });
+
+  // 工作台是单实例节点：整站只有一份，切视图时搬到当前视图的挂载点。
+  // 为什么搬而不是各页复制一份：工作台带运行状态（WB.run / order / 进度），
+  // 复制出第二份就成了永远不动的死壳，且 querySelector 会取到先出现的那份。
+  // 搬家 = 同一个 DOM 节点 appendChild，事件与状态都不丢。
+  function mountWorkbench(viewEl) {
+    var wb = document.querySelector("[data-workbench]") || WB_NODE;
+    if (!wb) return;
+    WB_NODE = wb;
+    var target = viewEl ? viewEl.querySelector("[data-wb-mount]") : null;
+    if (!target) {
+      // 当前视图没有挂载点（如问题页 / Skill 页）：把工作台收进隐藏暂存区，
+      // 别让它挂在别人页面里。⚠️ 不能从文档里摘掉——摘了之后 querySelector 找不到它，
+      // 切回来就再也挂不上了。暂存区是挂在 body 下的隐藏节点，节点本身不掉线、状态全在。
+      target = parkEl();
+      if (!target) return;
+    }
+    if (wb.parentNode !== target) target.appendChild(wb);
+  }
+
+  var WB_NODE = null;
+  function parkEl() {
+    var p = document.getElementById("wb-park");
+    if (!p) {
+      p = document.createElement("div");
+      p.id = "wb-park";
+      p.hidden = true;
+      p.setAttribute("aria-hidden", "true");
+      document.body.appendChild(p);
+    }
+    return p;
+  }
 
   function show(viewKey, scrollTop) {
     var id = "view-" + String(viewKey).replace(/[^a-z0-9]+/gi, "-").toLowerCase();
@@ -49,6 +289,16 @@
     Array.prototype.forEach.call(document.querySelectorAll(".nav a[data-view]"), function (a) {
       a.classList.toggle("active", a.getAttribute("href") === "#" + id);
     });
+    // 宽视图：把左侧索引栏让出来，内容占满整宽。
+    // 判据写在 DOM 上（data-wide-view），不在这里硬编码视图名 ——
+    // 以后再加宽视图不用改这段。
+    // 2026-11-18：原先是给工作流页用的（画布要横向铺开看链条），那个页面已删除；
+    // 这套机制保留，任何需要整宽的视图只要在模板里加 data-wide-view 即可。
+    var layout = document.querySelector(".layout");
+    if (layout) {
+      layout.classList.toggle("is-wide", target.hasAttribute("data-wide-view"));
+    }
+    mountWorkbench(target);
     if (scrollTop) window.scrollTo({ top: 0, behavior: "smooth" });
     return true;
   }
@@ -75,6 +325,9 @@
   function scrollToEl(hash) {
     var el = document.getElementById(hash);
     if (!el) return false;
+    // 从表格点条目标题跳过来时，目标卡片可能被用户收起来了。
+    // 不展开的话跳过去只有一行、看不到正文，等于跳了个寂寞。
+    if (el.tagName === "DETAILS" && !el.open) el.open = true;
     var nav = document.querySelector(".nav");
     var top = el.getBoundingClientRect().top + window.scrollY - (nav ? nav.offsetHeight : 0) - 12;
     window.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
@@ -95,8 +348,22 @@
   function route() {
     var raw = decodeURIComponent(location.hash.replace(/^#/, ""));
     if (!raw) {
-      show("overview");
-      return;
+      // 没有 hash 不代表用户想回总览：多半是 iframe 重建后重挂载。
+      // 用上次记住的落点恢复；没有记录才用设置里指定的默认页（默认仍是总览）。
+      var remembered = restoreRoute();
+      if (!remembered) remembered = defaultView();
+      if (remembered) {
+        // 用 replaceState 而不是 location.hash = ...：
+        // 后者会异步再触发一次 hashchange，中间先渲染总览、再跳回来，闪一下。
+        // 这里把 URL 写好，然后就地继续往下走，一次到位。
+        try {
+          history.replaceState(null, "", "#" + remembered);
+        } catch {}
+        raw = remembered;
+      } else {
+        show("overview");
+        return;
+      }
     }
     if (raw.indexOf("stage-") === 0) {
       var laneKey = raw.split("-").slice(1, -1).join("-");
@@ -106,7 +373,13 @@
       return;
     }
     if (raw.indexOf("view-") === 0) {
-      show(raw.slice(5), true);
+      // 目标页可能已经不存在了（例如「工作流」页被删掉，而本机 localStorage
+      // 或旧书签里还记着 #view-flow）。show() 找不到就直接掉回总览，
+      // 否则这里 return 之后整页没有任何 is-active 的视图 —— 用户看到的是空白。
+      if (!show(raw.slice(5), true)) {
+        forgetRoute();
+        show("overview");
+      }
       return;
     }
     var view = ITEM_VIEW[raw];
@@ -161,7 +434,13 @@
     });
   });
 
-  window.addEventListener("hashchange", route);
+  // 每次 hash 变化都记下落点：切视图、点导航、点卡片都算。
+  // 放在 hashchange 里而不是各点击处，是为了不漏掉任何一条改 hash 的路径
+  // （导航链接、卡片锚点、阶段筛选、以及脚本里直接改 location.hash 的地方）。
+  window.addEventListener("hashchange", function () {
+    saveRoute(location.hash);
+    route();
+  });
 
   // ─────────────────────── 主题 ───────────────────────
 
@@ -178,12 +457,20 @@
     });
   }
 
+  // 换主题只此一处。顶栏小色块和设置浮窗里的「主题」都走它，
+  // 免得两边各写一遍、哪天只改了一边。
+  function applyTheme(t) {
+    if (!t) return;
+    document.documentElement.setAttribute("data-theme", t);
+    try {
+      localStorage.setItem("ops-board-theme", t);
+    } catch (e) {}
+    paintThemeButtons();
+  }
+
   Array.prototype.forEach.call(document.querySelectorAll(".theme-swatch"), function (b) {
     b.addEventListener("click", function () {
-      var t = b.dataset.theme;
-      document.documentElement.setAttribute("data-theme", t);
-      localStorage.setItem("ops-board-theme", t);
-      paintThemeButtons();
+      applyTheme(b.dataset.theme);
     });
   });
   paintThemeButtons();
@@ -235,6 +522,71 @@
     e.preventDefault();
     setRail(!railHiddenNow());
   });
+
+  // ─────────────────────── 本机偏好 ───────────────────────
+
+  // 主题和侧栏本来就各有自己的键（顶栏色块、侧栏按钮直接写它们），
+  // 这里不搬家，只把剩下几项攒在一个键里。两套键都算「本机偏好」，
+  // 「清空」时一起清。
+  var PREF_KEY = "ops-board-set";
+  var PREF_DEF = { font: 16, view: "", scope: "all", evidence: true, hotkey: true };
+  var FONT_CHOICES = [15, 16, 17.5, 19];
+  var prefs = null;
+
+  function loadPrefs() {
+    var out = {};
+    var k;
+    for (k in PREF_DEF) out[k] = PREF_DEF[k];
+    try {
+      var raw = localStorage.getItem(PREF_KEY);
+      var got = raw ? JSON.parse(raw) : null;
+      if (got && typeof got === "object") {
+        for (k in PREF_DEF) {
+          if (Object.prototype.hasOwnProperty.call(got, k)) out[k] = got[k];
+        }
+      }
+    } catch (e) {}
+    // 存进来的值可能是手改过的 / 旧版本留下的，读的时候一律收一遍，
+    // 免得一个坏值让整页字号变成 0。
+    if (FONT_CHOICES.indexOf(Number(out.font)) < 0) out.font = PREF_DEF.font;
+    else out.font = Number(out.font);
+    if (["all", "title", "body"].indexOf(out.scope) < 0) out.scope = PREF_DEF.scope;
+    out.evidence = !!out.evidence;
+    out.hotkey = !!out.hotkey;
+    out.view = out.view ? String(out.view) : "";
+    return out;
+  }
+
+  function prefsNow() {
+    if (!prefs) prefs = loadPrefs();
+    return prefs;
+  }
+
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREF_KEY, JSON.stringify(prefsNow()));
+    } catch (e) {}
+  }
+
+  // 字号只有一个出口：把 px 换算成倍率写到 :root 上。
+  // CSS 那边正文各段都乘这个倍率，编号 / 时间 / 按钮不乘。
+  function applyFont(px) {
+    var v = Number(px);
+    if (!(v > 0)) v = PREF_DEF.font;
+    try {
+      document.documentElement.style.setProperty("--fs-scale", String(v / 16));
+    } catch (e) {}
+  }
+
+  // 空 hash 且没有上次落点时要打开的那一页。
+  // 返回值按 hash 的写法给（view-xxx），route() 里那几条分支都是这么比的。
+  function defaultView() {
+    var v = prefsNow().view;
+    if (!v) return "overview";
+    return "view-" + String(v).replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  }
+
+  applyFont(prefsNow().font);
 
   // ──────────────── 侧栏每块的「收起明细」 ────────────────
 
@@ -478,8 +830,1685 @@
     if (skillsBtn) {
       e.preventDefault();
       openSkillPanel(null);
+      return;
+    }
+    // 工作台按钮（选卡 → 分析 → 开始 → 停止）
+    var wbAnalyze = e.target.closest("[data-wb-analyze]");
+    if (wbAnalyze) { e.preventDefault(); workbenchAnalyze(); return; }
+    var wbStart = e.target.closest("[data-wb-start]");
+    if (wbStart) { e.preventDefault(); workbenchStart(); return; }
+    var wbStop = e.target.closest("[data-wb-stop]");
+    if (wbStop) { e.preventDefault(); workbenchStop(); return; }
+    var wbClear = e.target.closest("[data-wb-clear]");
+    if (wbClear) { e.preventDefault(); workbenchClear(); return; }
+    // 【遗留·无宿主】工作流页的「领这件 / 交还」：页面已于 2026-11-18 删除，
+    // 这两个分支现在永远匹配不到元素（平台不再渲染 [data-flow-release]/[data-flow-claim]）。
+    // 注意：claimFlowItem / releaseFlowItem 确实已是死代码 —— 它们都从
+    // btn.closest("[data-flow-node]") 取卡，而 [data-flow-node] 只由画布渲染。
+    // 工作台**不**复用这两个函数：它有自己的 claimForWorkbench / releaseForWorkbench，
+    // 直接打 /api/flow/{claim,release}，不依赖任何 DOM 节点。
+    // 所以「领取语义还活着」说的是接口和执行链路，不是这两个函数。
+    // 保留原因：一次只删一层，等清理画布遗留时连同上千行 flow 代码一起处理。
+    var releaseBtn = e.target.closest("[data-flow-release]");
+    if (releaseBtn) {
+      e.preventDefault();
+      releaseFlowItem(releaseBtn);
+      return;
+    }
+    var claimBtn = e.target.closest("[data-flow-claim]");
+    if (claimBtn) {
+      e.preventDefault();
+      claimFlowItem(claimBtn);
     }
   });
+
+  // ─────────────────── 工作流：领取 / 交还 ───────────────────
+
+  // 本页的执行者名字。用一个稳定的随机串，刷新后不变（存在 localStorage），
+  // 这样「谁领的」在页面重载后还能对得上。
+  function flowActor() {
+    var k = "ops-board-flow-actor";
+    try {
+      var v = localStorage.getItem(k);
+      if (v) return v;
+      var n = "win-" + Math.random().toString(36).slice(2, 8);
+      localStorage.setItem(k, n);
+      return n;
+    } catch (e) {
+      return "win-unknown";
+    }
+  }
+
+  function flowUrl(name) {
+    var env = harnessEnv();
+    if (env && env.id) return "/ops-board/b/" + env.id + "/api/flow/" + name;
+    return "/api/flow/" + name;
+  }
+
+  // 工作台的 API（/api/... 而不是 /api/flow/...）。在 Harness 里同样要带板前缀。
+  function wbUrl(path) {
+    var env = harnessEnv();
+    var p = String(path || "api/workbench/analyze");
+    if (!/^\//.test(p)) p = "/" + p;
+    var api = p.indexOf("/api/") === 0 ? p.slice(1) : p;
+    if (env && env.id) return "/ops-board/b/" + env.id + "/" + api;
+    return "/" + api;
+  }
+
+  function postJson(url, body, done) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", url, true);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      var j = null;
+      try { j = JSON.parse(xhr.responseText); } catch (e) { j = null; }
+      done(j, xhr.status);
+    };
+    xhr.send(JSON.stringify(body || {}));
+  }
+
+  // 改节点的外观：状态色 + 文字。
+  // 节点结构变了（左边框颜色表示状态，按钮只在可开工时出现），这里跟着改。
+  function paintFlowNode(node, state, note) {
+    if (!node) return;
+    node.classList.remove("flow-node-head", "flow-node-wait", "flow-node-claimed");
+    node.classList.add(
+      state === "running" ? "flow-node-claimed" : state === "wait" ? "flow-node-wait" : "flow-node-head"
+    );
+    var st = node.querySelector(".flow-node-state");
+    if (st) {
+      st.textContent = note || "";
+      st.className = "flow-node-state flow-state-" + (state === "running" ? "claimed" : state === "wait" ? "wait" : "head");
+    }
+  }
+
+  function claimFlowItem(btn) {
+    var id = btn.getAttribute("data-flow-claim");
+    if (!id || btn.getAttribute("disabled") !== null) return;
+    var node = btn.closest("[data-flow-node]");
+    btn.setAttribute("disabled", "");
+    btn.textContent = "领取中…";
+    postJson(flowUrl("claim"), { id: id, by: flowActor() }, function (res, status) {
+      if (status === 200 && res && res.ok) {
+        paintFlowNode(node, "running", "执行中 · " + res.by);
+        btn.textContent = "交还";
+        btn.removeAttribute("disabled");
+        btn.setAttribute("data-flow-release", id);
+        btn.removeAttribute("data-flow-claim");
+        // 同区域下一件要顶上来：整页重载最省事，且保证图和台账一致
+        if (res.nextInSameArea) {
+          setTimeout(function () { location.reload(); }, 900);
+        }
+      } else {
+        btn.textContent = "✕";
+        var why = (res && res.error) || "服务没有应答";
+        if (node) {
+          // 提示挂在节点底部，不要找 .flow-node-meta（图里已经没这个类了）
+          var tip = document.createElement("span");
+          tip.className = "flow-node-state flow-state-wait";
+          tip.textContent = why;
+          tip.style.whiteSpace = "normal";
+          node.appendChild(tip);
+        }
+        setTimeout(function () {
+          btn.textContent = "领";
+          btn.removeAttribute("disabled");
+        }, 2400);
+      }
+    });
+  }
+
+  function releaseFlowItem(btn) {
+    var id = btn.getAttribute("data-flow-release");
+    if (!id) return;
+    btn.setAttribute("disabled", "");
+    btn.textContent = "交还中…";
+    postJson(flowUrl("release"), { id: id, by: flowActor() }, function (res, status) {
+      if (status === 200 && res && res.ok) {
+        location.reload();
+      } else {
+        btn.textContent = "交还不掉";
+        setTimeout(function () {
+          btn.textContent = "交还";
+          btn.removeAttribute("disabled");
+        }, 2200);
+      }
+    });
+  }
+
+  // 进页面就问一次真实状态：刷新之后「谁在执行」必须还在，
+  // 否则页面显示「可开工」而服务端认为已被领走，点了就报错。
+  function syncFlowState() {
+    var nodes = document.querySelectorAll("[data-flow-node]");
+    if (!nodes.length) return;
+    getJson(flowUrl("plan"), function (res, status) {
+      if (status !== 200 || !res || !res.ok) return;
+      var map = {};
+      for (var i = 0; i < res.runnable.length; i++) {
+        var r = res.runnable[i];
+        map[r.id] = r;
+      }
+      for (var j = 0; j < nodes.length; j++) {
+        var node = nodes[j];
+        var id = node.getAttribute("data-flow-node");
+        var r = map[id];
+        var btn = node.querySelector("[data-flow-claim]");
+        if (r && r.state === "running") {
+          paintFlowNode(node, "running", "执行中 · " + r.by);
+          if (btn) {
+            btn.textContent = "交还";
+            btn.removeAttribute("disabled");
+            btn.setAttribute("data-flow-release", id);
+            btn.removeAttribute("data-flow-claim");
+          }
+        } else if (r && r.state === "ready") {
+          // 服务端说可以开工，就以服务端为准
+          paintFlowNode(node, "head", "可以开工");
+        } else if (!r) {
+          // 既不在可开工也不在执行 = 在排队
+          paintFlowNode(node, "wait", "排队中");
+          if (btn) {
+            btn.setAttribute("disabled", "");
+            btn.textContent = "";
+          }
+        }
+      }
+    });
+  }
+
+  // 真正的二维大画布（参考 React Flow / LogicFlow / litegraph）：
+  //   卡片带自由 {x,y} 坐标铺在开放的平面上，可拖到任意位置；
+  //   拖空白处 = 平移画布；滚轮 = 缩放。
+  // 不依赖 HTML5 原生 DnD（卡片里套 <a>/<button>，原生常失灵），用 pointer 事件自实现。
+  //
+  // 执行顺序：任何拖动/平移/缩放落定后，读所有卡当前坐标，按
+  // 「上→下、左→右」排序得到 `WB.dragPool`（工作台执行顺序）。链序约束
+  // 仍由服务端 analyze 兜底（同区域不可逆链序），画布规划是自由的。
+  var flowDrag = null;     // { mode:"card"|"pan", fromId, node, startX, startY, startL, startT, moved, ghost }
+  var CANVAS_SEL = "[data-flow-canvas-wrap]";
+
+  // 画布当前平移/缩放（读写 .flow-canvas 的 transform）
+  function canvasView() {
+    var pane = document.querySelector(".flow-canvas-pane");
+    var cv = document.querySelector("#flowCanv");
+    var st = { panX: 0, panY: 0, zoom: 1, pane: pane, cv: cv };
+    if (!cv) return st;
+    var tf = cv.style.transform || "";
+    var m = /translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)\s*scale\(([\d.]+)\)/.exec(tf);
+    if (m) { st.panX = parseFloat(m[1]); st.panY = parseFloat(m[2]); st.zoom = parseFloat(m[3]); }
+    return st;
+  }
+  function applyCanvasView(v) {
+    if (v.cv) v.cv.style.transform = "translate(" + v.panX + "px," + v.panY + "px) scale(" + v.zoom + ")";
+    if (v.pane) v.pane.classList.toggle("panning", v.panning);
+  }
+  // 屏幕坐标 → 画布坐标（考虑 pan/zoom）。返回相对于 .flow-canvas 原点的坐标。
+  function screenToCanvas(clientX, clientY) {
+    var v = canvasView();
+    var r = v.cv.getBoundingClientRect();
+    // r.left 已是 pan 后的视口位置；画布坐标 = (视口偏移 + pan) / zoom
+    // 简化：视觉左上角 → 画布原点
+    var cx = (clientX - (r.left)) / v.zoom;
+    var cy = (clientY - (r.top)) / v.zoom;
+    return { x: cx, y: cy };
+  }
+
+  function bindFlowDrag() {
+    var nodes = document.querySelectorAll("#flowCanv [data-flow-node]");
+    Array.prototype.forEach.call(nodes, function (node) {
+      // 所有卡都能拖动摆放（含执行中的 claimed 卡——否则它会被丢在最底下
+      // 卡死动不了）。claimed 只是不参与「执行顺序」重排，纯移动位置。
+      node.classList.add("flow-node-draggable");
+    });
+    document.addEventListener("pointerdown", flowDragStart);
+    document.addEventListener("pointermove", flowDragMove);
+    document.addEventListener("pointerup", flowDragEnd);
+    document.addEventListener("pointercancel", flowDragEnd);
+    document.addEventListener("contextmenu", flowContextMenu);
+    document.addEventListener("pointerdown", flowCloseMenuOnAway);
+    document.addEventListener("scroll", flowMenuClose, true);
+    // 复位视图
+    var reset = document.querySelector("[data-flow-reset]");
+    if (reset) reset.addEventListener("click", flowResetView);
+  }
+
+  // 右键选「下一步」(菜单已打开时，点别处关掉)
+  function flowCloseMenuOnAway(e) {
+    if (!FLOW_MENU) return;
+    if (e.target && typeof e.target.closest === "function" && e.target.closest("[data-flow-menu]")) return;
+    flowMenuClose();
+  }
+
+  // ─────────────────── 右键选「下一步」───────────────────
+  // 在流程画布上右键一张卡，弹出菜单列出其他候选卡；点选后把它排到
+  // 这张被右键的卡「紧后一个位置」，作为它的下一步（很自然的连链方式，
+  // 不用拖动）。working 里的卡不可右键选下一步。
+  var FLOW_MENU = null;
+  function flowContextMenu(e) {
+    if (!wbPresent()) return;
+    var node = flowNodeFromTarget(e.target);
+    if (!node || node.classList.contains("flow-node-claimed")) return; // 只有未领卡的右键才进菜单
+    e.preventDefault();
+    var id = node.getAttribute("data-flow-node");
+    // 候选 = 画布上其余所有未领的卡，且**不在任务队列里的**（不含自己、不含正在执行的）。
+    // 已经在 dragPool（工作台任务队列）里的卡不提供为可选——它已经是某步的任务了。
+    var inQueue = {};
+    (WB.dragPool || []).forEach(function (x) { inQueue[x] = 1; });
+    var cand = Array.prototype.filter.call(
+      document.querySelectorAll("#flowCanv .flow-canvas-card[data-flow-node]"),
+      function (c) {
+        var cId = c.getAttribute("data-flow-node");
+        if (c === node || cId === id) return false;
+        if (c.classList.contains("flow-node-claimed")) return false;
+        if (inQueue[cId]) return false; // 已在任务队列的卡不作为「下一步」可选项
+        return true;
+      }
+    ).map(function (c) {
+      var t = c.querySelector(".flow-node-title");
+      return { id: c.getAttribute("data-flow-node"), title: t ? t.textContent : "" };
+    });
+    if (!cand.length) return;
+    // 移除旧菜单
+    flowMenuClose();
+    var menu = document.createElement("div");
+    menu.className = "flow-menu";
+    menu.setAttribute("data-flow-menu", "");
+    menu.style.left = e.clientX + "px";
+    menu.style.top = e.clientY + "px";
+    var head = document.createElement("div");
+    head.className = "flow-menu-head";
+    head.textContent = "「" + id + "」之后接着做…";
+    menu.appendChild(head);
+    cand.forEach(function (c) {
+      var opt = document.createElement("button");
+      opt.type = "button";
+      opt.className = "flow-menu-item";
+      opt.setAttribute("data-flow-next", c.id);
+      opt.innerHTML = '<span class="flow-menu-id">' + esc(c.id) + '</span><span class="flow-menu-title">' + esc(c.title) + "</span>";
+      opt.addEventListener("click", function () { flowPickNext(id, c.id); });
+      menu.appendChild(opt);
+    });
+    document.body.appendChild(menu);
+    FLOW_MENU = menu;
+  }
+  function flowMenuClose() {
+    if (FLOW_MENU && FLOW_MENU.parentNode) FLOW_MENU.parentNode.removeChild(FLOW_MENU);
+    FLOW_MENU = null;
+  }
+  // 把 nextId 排到 anchorId 的紧后一个位置（作为它的下一步）
+  function flowPickNext(anchorId, nextId) {
+    flowMenuClose();
+    if (!WB.dragPool) WB.dragPool = [];
+    var pool = WB.dragPool.slice();
+    var ai = pool.indexOf(anchorId);
+    // anchor 不在池里：先用画布当前顺序（上→下、左→右）重建一个干净的执行顺序，
+    // 保证 anchor 一定在，再做插入。
+    if (ai === -1) {
+      pool = flowReadOrder().filter(function (x) { return x !== nextId; });
+      ai = pool.indexOf(anchorId);
+      if (ai === -1) pool.push(anchorId), ai = pool.length - 1;
+    }
+    var ni = pool.indexOf(nextId);
+    if (ni !== -1) pool.splice(ni, 1); // 先移除旧的 next 位置
+    ai = pool.indexOf(anchorId); // splice 后重新查 anchor 下标
+    pool.splice(ai + 1, 0, nextId); // 插到 anchor 之后
+    WB.dragPool = pool;
+    var poolEl = WB.el && WB.el.querySelector("[data-wb-pool]");
+    if (poolEl) renderWorkbenchPool(poolEl);
+    // 只更新工作台顺序 + 重画「右缘→下一张左缘」的顺序箭头，让箭头直接指向
+    // 被选为「下一步」的这张卡。**不动其它卡片的摆放位置**（保持用户手动摆的 2D 布局）。
+    try {
+      var linkable = pool.filter(function (x) {
+        var el = document.querySelector('#flowCanv [data-flow-node="' + x + '"]');
+        return el && !el.classList.contains("flow-node-claimed");
+      });
+      flowDrawOrderEdges(linkable);
+    } catch (err) {}
+    workbenchLog("右键：把「" + nextId + "」排到「" + anchorId + "」之后，作为它的下一步。");
+  }
+
+  function flowNodeFromTarget(t) {
+    if (!t || typeof t.closest !== "function") return null;
+    return t.closest("#flowCanv [data-flow-node]");
+  }
+
+  function flowDragStart(e) {
+    if (e.button !== 0) return; // 只要左键
+    var node = flowNodeFromTarget(e.target);
+    var interactive = e.target && typeof e.target.closest === "function"
+      ? e.target.closest("a,button,.btn") : null;
+    // 按在卡片上（且非链接/按钮）→ 拖卡片到任意位置；空白处走正常滚动（不平移）。
+    // claimed 卡也能拖（纯摆放），只是不会改执行顺序。
+    if (node && !interactive) {
+      flowDrag = {
+        mode: "card", fromId: node.getAttribute("data-flow-node"), node: node,
+        startX: e.clientX, startY: e.clientY,
+        startL: parseFloat(node.style.left) || 0, startT: parseFloat(node.style.top) || 0,
+        moved: false, ghost: null,
+        claimed: node.classList.contains("flow-node-claimed"),
+      };
+    }
+  }
+
+  // 独立构造拖动时的「抓手」卡：不克隆真实 DOM（克隆会把卡片已有的
+  // 内容/内联样式/乃至外层继承的字体 scale 一起带进来，在嵌入环境里常
+  // 造成字体异常）。刻一张干净、稍放大的浮卡：**id 大字 + 标题原文**，
+  // 让人一眼看懂现在抓的是哪张；foot/按钮/状态都不带，避免遮挡与噪音。
+  function flowMakeGhost(src) {
+    var g = document.createElement("div");
+    g.className = "flow-canvas-card flow-ghost";
+    var id = src.getAttribute("data-flow-node") || "";
+    var titleEl = src.querySelector(".flow-node-title");
+    var title = titleEl ? titleEl.textContent : "";
+    g.setAttribute("data-flow-node", id);
+
+    var idEl = document.createElement("div");
+    idEl.className = "flow-node-id flow-ghost-id";
+    idEl.style.fontFamily = "var(--mono,ui-monospace,Menlo,Consolas,monospace)";
+    idEl.style.fontSize = "11px";
+    idEl.style.fontWeight = "700";
+    idEl.style.letterSpacing = ".06em";
+    idEl.style.color = "var(--head)";
+    idEl.textContent = id;
+    g.appendChild(idEl);
+
+    if (title) {
+      var tEl = document.createElement("div");
+      tEl.className = "flow-node-title flow-ghost-title";
+      tEl.style.fontSize = "12px";
+      tEl.style.fontWeight = "600";
+      tEl.style.lineHeight = "1.4";
+      tEl.style.color = "var(--ink)";
+      tEl.textContent = title;
+      g.appendChild(tEl);
+    }
+
+    g.style.position = "fixed";
+    g.style.visibility = "hidden";
+    g.style.width = (parseFloat(src.style.width) || 188) + 6 + "px";
+    g.style.height = "auto";
+    g.style.minHeight = "0";
+    g.style.padding = "10px 12px";
+    g.style.justifyContent = "flex-start";
+    g.style.gap = "5px";
+    g.style.border = "1px solid var(--blue)";
+    g.style.background = "var(--surface-strong)";
+    g.style.borderRadius = "8px";
+    g.style.pointerEvents = "none";
+    g.style.zIndex = "99999";
+    return g;
+  }
+  // 让影子跟随原卡当前屏幕位置
+  function flowUpdateGhost(ghost, node) {
+    if (!ghost || !node) return;
+    var r = node.getBoundingClientRect();
+    ghost.style.left = r.left + "px";
+    ghost.style.top = r.top + "px";
+    ghost.style.visibility = "visible";
+  }
+  // 拖动时让箭头跟随卡片：重算所有「以该卡为源或为目标」的边。
+  // 卡片用画布内 left/top 绝对坐标，边两端锚在相邻卡的边缘（源右 → 目标左），
+  // 垂直方向取各自卡片中点。bezier 控制点 = 两端 x 的中点（参考 React Flow getBezierPath）。
+  // 返回是否有边被更新（供测试探针用）。
+  function flowUpdateEdges(fromId) {
+    if (!fromId) return 0;
+    var cv = document.querySelector("#flowCanv");
+    if (!cv) return 0;
+    var nodes = {};
+    var cards = document.querySelectorAll("#flowCanv .flow-canvas-card[data-flow-node]");
+    for (var i = 0; i < cards.length; i++) {
+      nodes[cards[i].getAttribute("data-flow-node")] = cards[i];
+    }
+    var edges = document.querySelectorAll("#flowCanv .flow-edge");
+    var updated = 0;
+    for (var j = 0; j < edges.length; j++) {
+      var e = edges[j];
+      var f = e.getAttribute("data-edge-from");
+      var to = e.getAttribute("data-edge-to");
+      if (f !== fromId && to !== fromId) continue;
+      var fromNode = nodes[f], toNode = nodes[to];
+      if (!fromNode || !toNode) continue;
+      var w = parseFloat(fromNode.style.width) || 188;
+      var h = parseFloat(fromNode.style.height) || 88;
+      var th = parseFloat(toNode.style.height) || 88;
+      // 源卡片右边缘中点；目标卡片左边缘中点
+      var x1 = (parseFloat(fromNode.style.left) || 0) + w;
+      var y1 = (parseFloat(fromNode.style.top) || 0) + h / 2;
+      var x2 = parseFloat(toNode.style.left) || 0;
+      var y2 = (parseFloat(toNode.style.top) || 0) + th / 2;
+      var mx = (x1 + x2) / 2;
+      var d = "M" + x1 + "," + y1 + " C" + mx + "," + y1 + " " + mx + "," + y2 + " " + x2 + "," + y2;
+      e.setAttribute("d", d);
+      updated++;
+    }
+    return updated;
+  }
+
+  function flowDragMove(e) {
+    if (!flowDrag) return;
+    var dx = e.clientX - flowDrag.startX;
+    var dy = e.clientY - flowDrag.startY;
+    if (flowDrag.mode === "pan") {
+      // 平移整张画布
+      var v = canvasView();
+      applyCanvasView({ cv: v.cv, pane: v.pane, panX: flowDrag.startPanX + dx, panY: flowDrag.startPanY + dy, zoom: flowDrag.zoom, panning: true });
+      return;
+    }
+    // 卡片拖动
+    if (!flowDrag.moved) {
+      if (Math.abs(dx) + Math.abs(dy) < 6) return; // 阈值，避免误触点击
+      flowDrag.moved = true;
+      var v0 = canvasView();
+      flowDrag.zoom = v0.zoom;
+      flowDrag.ghost = flowMakeGhost(flowDrag.node); // 独立构造的轻量影子，杜绝克隆样式遗症
+      document.body.appendChild(flowDrag.ghost);
+      flowDrag.node.classList.add("flow-drag-src");
+    }
+    var zoom = flowDrag.zoom || 1;
+    // 新坐标 = 起点 + (屏幕位移 / zoom)，保持手指下不跳（自由摆放，卡跟手走）
+    var nl = flowDrag.startL + dx / zoom;
+    var nt = flowDrag.startT + dy / zoom;
+    flowDrag.node.style.left = nl + "px";
+    flowDrag.node.style.top = nt + "px";
+    if (flowDrag.ghost) {
+      flowUpdateGhost(flowDrag.ghost, flowDrag.node);
+    }
+    // 连线跟随：按每张卡当前坐标整条重画执行顺序链，箭头始终「右缘→下一张左缘」，
+    // 拖动过程中保持一致的方向、不出现往回头乱指的边。
+    try { flowDrawOrderEdges(flowFullOrder()); } catch (err) {}
+  }
+
+  function flowWheel(e) {
+    var pane = document.querySelector(".flow-canvas-pane");
+    if (!pane) return;
+    e.preventDefault();
+    var v = canvasView();
+    var factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    var zoom = Math.max(0.4, Math.min(2.2, v.zoom * factor));
+    // 以光标为锚缩放（CursorSpace 缩放）
+    var r = v.cv.getBoundingClientRect();
+    var px = e.clientX - r.left, py = e.clientY - r.top;
+    var k = zoom / v.zoom;
+    var panX = v.panX - px * (k - 1);
+    var panY = v.panY - py * (k - 1);
+    applyCanvasView({ cv: v.cv, pane: v.pane, panX: panX, panY: panY, zoom: zoom });
+  }
+
+  function flowResetView() {
+    var v = canvasView();
+    applyCanvasView({ cv: v.cv, pane: v.pane, panX: 0, panY: 0, zoom: 1 });
+    flowRefreshOrderFromCanvas(false);
+    workbenchLog("画布视图已复位。");
+  }
+
+  function flowDragEnd(e) {
+    if (!flowDrag) return;
+    var mode = flowDrag.mode;
+    var fromId = flowDrag.fromId;
+    var wasClaimed = !!flowDrag.claimed;
+    if (flowDrag.ghost && flowDrag.ghost.parentNode) flowDrag.ghost.parentNode.removeChild(flowDrag.ghost);
+    if (flowDrag.node) flowDrag.node.classList.remove("flow-drag-src");
+    var v = canvasView();
+    if (v.pane) v.pane.classList.remove("panning");
+    flowDrag = null;
+    // 卡片拖动落定：**自由摆放**，卡就停在你放下它的位置，不再被重排回网格。
+    // 只做两件事：把最新顺序写回工作台（若动了执行顺序），并按当前坐标重画顺序箭头。
+    if (mode === "card") {
+      if (!wasClaimed) { try { flowRefreshOrderFromCanvas(false, fromId); } catch (err) {} }
+      try { flowDrawOrderEdges(flowFullOrder()); } catch (err) {}
+    }
+  }
+
+  // 读当前所有卡坐标（上→下、左→右）作为执行顺序，写进 WB.dragPool。
+  // 用 getBoundingClientRect 排序（受 pan/zoom 影响的是整体，相对顺序不变，
+  // 所以直接按视觉位置排序即可）。
+  function flowReadOrder() {
+    var cards = Array.prototype.filter.call(
+      document.querySelectorAll("#flowCanv .flow-canvas-card"),
+      function (c) { return !c.classList.contains("flow-node-claimed"); }
+    );
+    return cards
+      .sort(function (a, b) {
+        var ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+        if (Math.abs(ar.top - br.top) > 8) return ar.top - br.top; // 优先按行（上→下）
+        return ar.left - br.left; // 同行按左→右
+      })
+      .map(function (c) { return c.getAttribute("data-flow-node"); });
+  }
+
+  function flowRefreshOrderFromCanvas(apply, fromId) {
+    if (!wbPresent()) return;
+    if (!WB.dragPool) WB.dragPool = [];
+    var el = WB.el && WB.el.querySelector("[data-wb-pool]");
+
+    if (apply && fromId) {
+      // 拖动单张落定：只重排「这一张」的位置，其它卡的相对顺序完全不动。
+      // 这样工作台顺序不会因为拖一张而整体乱跳，拖完也好预测。
+      var pool = WB.dragPool.slice();
+      var mi = pool.indexOf(fromId);
+      if (mi === -1) pool.push(fromId), mi = pool.length - 1;
+      pool.splice(mi, 1); // 先拿掉被拖的卡
+      var moved = flowCanvasRank(fromId); // 被拖卡当前站位（0-based）
+      var insertAt = Math.max(0, Math.min(moved, pool.length));
+      pool.splice(insertAt, 0, fromId);
+      WB.dragPool = pool;
+      if (el) renderWorkbenchPool(el);
+      workbenchRefreshModeBtn();
+      var pos = insertAt + 1;
+      workbenchLog("已把「" + fromId + "」排到执行顺序第 " + pos + " 位（其它卡顺序不变）：" + pool.join(" → ") + "。");
+      return;
+    }
+
+    // 复位(pass apply=false)/平移：按画布视觉位置重排一次（只有真正进画布才需要）
+    if (!apply) {
+      // 复位视图时同步执行顺序为当前画布布局
+      var order = flowReadOrder();
+      if (!order.length) return;
+      var newPool = order.slice();
+      (WB.dragPool || []).forEach(function (id) {
+        if (newPool.indexOf(id) === -1) {
+          var c = (WB.candidate || []).filter(function (x) { return x.id === id; })[0];
+          if (c && c.state === "running") newPool.push(id);
+        }
+      });
+      WB.dragPool = newPool;
+      if (el) renderWorkbenchPool(el);
+      workbenchRefreshModeBtn();
+      return;
+    }
+  }
+
+  // 被拖卡在当前画布上的「站位」：按视觉位置对其它未领卡排序，数它排在第几（0-based）。
+  function flowCanvasRank(id) {
+    var target = document.querySelector('[data-flow-node="' + id + '"]');
+    if (!target) return 0;
+    var tr = target.getBoundingClientRect();
+    var others = Array.prototype.filter.call(
+      document.querySelectorAll("#flowCanv .flow-canvas-card[data-flow-node]"),
+      function (c) {
+        return c.getAttribute("data-flow-node") !== id && !c.classList.contains("flow-node-claimed");
+      }
+    );
+    var rank = 0;
+    for (var i = 0; i < others.length; i++) {
+      var or = others[i].getBoundingClientRect();
+      if (tr.top - or.top > 8) rank++;
+      else if (Math.abs(tr.top - or.top) <= 8 && tr.left > or.left) rank++;
+    }
+    return rank;
+  }
+
+  // 画布当前完整执行顺序 = 工作台 dragPool（前导）+ 其余未领卡（按视觉位置接在后面）。
+  // 这样「分析出的顺序 / 手动调序」始终是画布的顺序来源。
+  function flowFullOrder() {
+    var order = [];
+    var seen = {};
+    var lead = (WB.dragPool || []).slice();
+    lead.forEach(function (id) { if (!seen[id]) { order.push(id); seen[id] = 1; } });
+    var cards = document.querySelectorAll("#flowCanv .flow-canvas-card[data-flow-node]");
+    Array.prototype.forEach.call(cards, function (c) {
+      if (c.classList.contains("flow-node-claimed")) return;
+      var id = c.getAttribute("data-flow-node");
+      if (seen[id]) return;
+      order.push(id); seen[id] = 1;
+    });
+    return order;
+  }
+
+  // 取一张卡的画布坐标宽高
+  function flowNodeBox(n) {
+    return {
+      w: parseFloat(n.style.width) || 188,
+      left: parseFloat(n.style.left) || 0,
+      top: parseFloat(n.style.top) || 0,
+      h: n.getBoundingClientRect().height || 88,
+    };
+  }
+
+  // 按相邻关系重画整条「执行顺序」箭头链：order[i] → order[i+1]。
+  // 清掉旧的 .flow-edge，按当前每张卡的实际坐标重新生成。
+  // **箭头方向 = 从上一张卡片的右边缘中点，指向下一张卡片的左边缘中点**
+  // （横向左→右流程）。与拖动时 flowUpdateEdges 用同一套几何，拖起来不会乱。
+  function flowDrawOrderEdges(order) {
+    var svg = document.querySelector("#flowCanv .flow-edge-svg");
+    if (!svg) return;
+    var old = svg.querySelectorAll(".flow-edge");
+    for (var i = 0; i < old.length; i++) if (old[i].parentNode) old[i].parentNode.removeChild(old[i]);
+    for (var j = 0; j < order.length; j++) {
+      var fromEl = document.querySelector('#flowCanv [data-flow-node="' + order[j] + '"]');
+      var toEl = order[j + 1] ? document.querySelector('#flowCanv [data-flow-node="' + order[j + 1] + '"]') : null;
+      if (!fromEl || !toEl) continue;
+      var fb = flowNodeBox(fromEl), tb = flowNodeBox(toEl);
+      // 源卡右边缘中点 → 目标卡左边缘中点（左→右），bezier 控制点 = 两端 x 中点
+      var x1 = fb.left + fb.w, y1 = fb.top + fb.h / 2;
+      var x2 = tb.left, y2 = tb.top + tb.h / 2;
+      var mx = (x1 + x2) / 2;
+      var d = "M" + x1 + "," + y1 + " C" + mx + "," + y1 + " " + mx + "," + y2 + " " + x2 + "," + y2;
+      var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("class", "flow-edge");
+      path.setAttribute("d", d);
+      path.setAttribute("data-edge-from", order[j]);
+      path.setAttribute("data-edge-to", order[j + 1]);
+      path.setAttribute("marker-end", "url(#flow-arrow)");
+      svg.appendChild(path);
+    }
+  }
+
+  // 把整张画布按「队列在上、备选在下」的上下分区，横向左→右排开：
+  //   · 队列区（dragPool 顺序 + 正在执行的 claimed 卡）：排在上方，卡之间画
+  //     「右缘→下一张左缘」的执行顺序箭头。
+  //   · 备选区（画布上但未进队列、未在执行的卡）：排在下方，作为备用候选，
+  //     横向铺开，供随时加进队列。
+  // leadingIds 缺省用当前 dragPool。这个函数只在「队列/备选」构成变化时调用
+  // （初始化铺卡、加卡/移卡、清空重排），不打断用户正在进行的自由拖动。
+  function flowReorderCanvas(leadingIds) {
+    if (!wbPresent()) return;
+    var cv = document.querySelector("#flowCanv");
+    if (!cv) return;
+
+    // 收集画布上所有卡，按身份分组
+    var map = {};
+    Array.prototype.forEach.call(document.querySelectorAll("#flowCanv .flow-canvas-card[data-flow-node]"), function (c) {
+      map[c.getAttribute("data-flow-node")] = c;
+    });
+
+    var lead = (leadingIds && leadingIds.length) ? leadingIds : (WB.dragPool || []);
+    var queued = [];
+    var queuedSeen = {};
+    lead.forEach(function (id) { if (map[id] && !queuedSeen[id]) { queued.push(id); queuedSeen[id] = 1; } });
+
+    // 未进队列的卡 = 画布上有、但不在 dragPool 且不是 executed → 备选
+    var standby = [];
+    var claimed = []; // 正在执行的归队列区末尾
+    Object.keys(map).forEach(function (id) {
+      if (queuedSeen[id]) return;
+      if (map[id].classList.contains("flow-node-claimed")) { claimed.push(id); }
+      else { standby.push(id); }
+    });
+
+    // 全部卡片按身份标识（备选卡加 .flow-node-standby）
+    var all = queued.concat(claimed).concat(standby);
+    var inQueueSet = {}; queued.forEach(function (id) { inQueueSet[id] = 1; });
+    all.forEach(function (id) {
+      var n = map[id];
+      n.classList.remove("flow-node-standby");
+      if (standby.indexOf(id) > -1) n.classList.add("flow-node-standby");
+    });
+
+    if (!all.length) return;
+    flowLayoutCards({ queued: queued, claimed: claimed, standby: standby }, map);
+
+    // 执行顺序箭头只在队列链（queued）之间连；备选不连箭头
+    var linkable = queued.filter(function (id) { return map[id]; });
+    flowDrawOrderEdges(linkable);
+    workbenchLog("画布已分区：队列在上（" + queued.length + " 张，横向排）· 备选在下（" +
+      standby.length + " 张可加）" + (claimed.length ? " · 执行中 " + claimed.length + " 张" : "") + "。");
+  }
+
+  // 上下分区横向排版：队列 + 执行中在上（横向），备选另起一块在下（横向）。
+  function flowLayoutCards(parts, map) {
+    var cv = document.querySelector("#flowCanv");
+    if (!cv) return;
+    var PAD = 48, GAP_X = 34, ROW_GAP = 34;
+    var y = PAD, x = PAD, maxW = PAD, rowH = 0;
+
+    function placeRow(ids) {
+      x = PAD;
+      ids.forEach(function (id) {
+        var n = map[id];
+        if (!n) return;
+        var bw = flowNodeBox(n);
+        n.style.left = x + "px";
+        n.style.top = y + "px";
+        x += bw.w + GAP_X;
+        rowH = Math.max(rowH, bw.h);
+        if (x > maxW) maxW = x;
+      });
+      y += rowH + ROW_GAP;
+      rowH = 0;
+    }
+
+    // 队列区（可多行，遇到右缘换行）—— 简化：每区放一行；卡多时会换行，仍保持横向优先
+    placeRow(parts.queued.concat(parts.claimed));
+
+    // 备选区
+    if (parts.standby.length) {
+      placeRow(parts.standby);
+    }
+
+    cv.style.width = (maxW + PAD) + "px";
+    cv.style.height = (y + PAD - ROW_GAP + rowH) + "px";
+  }
+
+  // 把 id 这张卡在 dragPool 里移到 rank 位，然后整体重排一次。
+  // 专门给「拖动中格栅排位」用：被拖卡跟着手走，插回它当前该在的位置，
+  // 其它卡顺序不动，画布始终保持左→右的有序流程。
+  function flowRepositionAt(id, rank) {
+    if (!WB.dragPool) WB.dragPool = [];
+    var pool = WB.dragPool.slice();
+    var mi = pool.indexOf(id);
+    if (mi === -1) pool.push(id), mi = pool.length - 1;
+    pool.splice(mi, 1);
+    var at = Math.max(0, Math.min(rank, pool.length));
+    pool.splice(at, 0, id);
+    WB.dragPool = pool;
+    flowReorderCanvas();
+  }
+
+  // ─────────────────────── 工作台（自动执行） ───────────────────────
+  //
+  // 从「看图 → 手动点领」到「让机器自动跑一段」，这一步的核心是**编排**：
+  // 用户勾选要处理的卡 → 选串行/并行 → 机器守着 flow 的约束逐张
+  // claim → 交给 Harness 分析（复用 harnessPost）→ 取回回答 → 记下结论
+  // → release 让同区域下一件顶上。全程在页面上能看到每一张卡走到哪了。
+  //
+  // ⚠️ 为什么不放在 serve.mjs：真正「执行一张卡」= 把卡喂给 Harness 并
+  // 取回答，这条路只存在于看板页（harnessPost → /ops-board/ask → session）。
+  // serve.mjs 没有问模型的入口，所以编排器放这里，serve 只提供纯计算的
+  // analyze 建议（见 lib/workbench.mjs）。
+
+  var WB = {
+    el: document.querySelector("[data-workbench]"),
+    selected: [],           // (保留，dragPool 取代) 旧勾选
+    dragPool: [],           // 拖动排列的卡 id（顺序即执行顺序）
+    seedOnce: false,        // 候选池首刷是否已铺过（防清空后刷新又全塞回）
+    candidate: [],          // 全部候选（ready/wait/running）
+    plan: [],
+    steps: null,            // serve 分析的 serial/parallel 结果
+    batteries: null,        // 看板手动分批：[{index, reason, cards:[{id,title,...}]}]
+    order: [],              // 实际执行顺序：{id, title, prefix, why}
+    run: false,             // 是否正在跑
+    stop: false,            // 用户点了停止
+    mode: "serial",         // serial | parallel
+    index: -1,              // order 里当前执行到第几步
+    busy: false,            // 正在 claim 或等 Harness 回答
+    execOrder: [],          // 按 claim 成功先后记的执行顺序（留给报告/调试）
+    batchSize: 1,           // 分批粒度：每批几张卡（默认串行=每批 1 张）
+    batchMode: false,       // true = 走「看板分批→整批交给 Agent」新执行模型
+  };
+  // 暴露给测试/扩展：只读探针，不会在正常页面干扰任何东西。
+  try { window.__wb = WB; } catch (e) {}
+
+  function wbPresent() { return !!WB.el; }
+
+  // 用 plan 铺候选池。ready=可开工，running=已被领走（只读显示），
+  // waiting=排队（规划用；执行时等到它可领才真跑）。
+  // 池 = 一张可拖拽排序的队列：拖动排顺序，顺序即执行顺序；每张可点 ✕ 移出。
+  function workbenchRefresh() {
+    if (!wbPresent()) return;
+    getJson(flowUrl("plan"), function (res, status) {
+      if (status !== 200 || !res || !res.ok) return;
+      WB.plan = res;
+      var pool = WB.el.querySelector("[data-wb-pool]");
+      if (!pool) return;
+      // 候选 = ready（可开工）+ waiting（排队）+ running（显示占用但不进队列）
+      var cand = [];
+      (res.runnable || []).forEach(function (r) {
+        if (r.state === "running") cand.push({ id: r.id, title: r.title, prefix: r.prefix, state: "running", by: r.by || "" });
+        else cand.push({ id: r.id, title: r.title, prefix: r.prefix, state: "ready", by: "" });
+      });
+      (res.waiting || []).forEach(function (w) {
+        cand.push({ id: w.id, title: w.title, prefix: w.prefix, state: "wait", by: "", waitsFor: w.waitsFor || "" });
+      });
+      if (!res.runnable && !res.waiting) cand = cand; // noop
+      // 首次铺开：**执行队列初始为空**、所有卡都在备选区，用户自己把想做的
+      // 点/拖进队列（用户要「一进页面全空、全在备选」）。之后刷新只做增量合并，
+      // 保留用户已排的顺序与移出状态。
+      var firstRun = !WB.seedOnce;
+      WB.seedOnce = true;
+      if (firstRun) {
+        WB.dragPool = [];
+      } else {
+        // 保留用户已排的顺序与移出状态，仅合并新出现的卡
+        var known = WB.dragPool.slice();
+        var kept = known.filter(function (id) { return cand.some(function (c) { return c.id === id && c.state !== "running"; }); });
+        cand.filter(function (c) { return c.state !== "running" && kept.indexOf(c.id) === -1; })
+          .forEach(function (c) { kept.push(c.id); });
+        WB.dragPool = kept;
+      }
+      WB.candidate = cand;
+      renderWorkbenchPool(pool);
+      workbenchRefreshModeBtn();
+      // 画布按「队列在上 / 备选在下」分区，重新铺一次（首次铺开后即生效）
+      try { flowReorderCanvas(); } catch (err) {}
+    });
+  }
+
+  // 一键清空：把执行队列（要做的卡）全部退掉，回到「还没选」的状态。
+  // 不清 running（机器正在跑的归它），只清可排的候选；同时收起已铺开的
+  // 步骤区与分析结果，让工作台回到干净的初始态。
+  function workbenchClear() {
+    if (!wbPresent()) return;
+    if (WB.run) { workbenchLog("正在执行，先停止再清空。"); workbenchStop(); }
+    WB.dragPool = [];
+    WB.plan = [];
+    WB.steps = null;
+    WB.batches = null;
+    WB.order = [];
+    WB.index = -1;
+    WB.execOrder = [];
+    WB.mode = "serial";
+    var pool = WB.el.querySelector("[data-wb-pool]");
+    if (pool) renderWorkbenchPool(pool);
+    // 收起执行区、回复位按钮
+    var runEl = WB.el.querySelector("[data-wb-run]");
+    if (runEl) runEl.setAttribute("hidden", "");
+    var stepsEl = WB.el.querySelector("[data-wb-steps]");
+    if (stepsEl) stepsEl.innerHTML = "";
+    var start = WB.el.querySelector("[data-wb-start]");
+    var analyze = WB.el.querySelector("[data-wb-analyze]");
+    var stopBtn = WB.el.querySelector("[data-wb-stop]");
+    if (analyze) analyze.disabled = true;
+    if (start) start.disabled = true;
+    if (stopBtn) stopBtn.disabled = true;
+    workbenchRefreshModeBtn();
+    workbenchLog("工作台已清空，执行队列全部退掉。回到起始状态。");
+  }
+
+  function renderWorkbenchPool(pool) {
+    if (!WB.candidate.length) {
+      pool.innerHTML = '<p class="workbench-empty">没有可开工的卡。排队的卡要等前面那件领走并做完才能进池。</p>';
+      return;
+    }
+    var byId = {};
+    WB.candidate.forEach(function (c) { byId[c.id] = c; });
+    // 队列里的卡（要做的）横向铺开；未进队列的备选卡单独成一组（虚线框、点一下加入）。
+    var queued = WB.dragPool.map(function (id) {
+      var c = byId[id];
+      if (!c) return "";
+      var label = esc(c.title);
+      if (c.state === "wait") label += ' <span class="wb-queued">· 等 ' + esc(c.waitsFor) + "</span>";
+      else if (c.state === "running") label += ' <span class="wb-occupied">· ' + esc(c.by) + " 正在做</span>";
+      return (
+        '<div class="wb-pick" draggable="true" data-wb-id="' + esc(c.id) + '">' +
+        '<span class="wb-pick-row"><span class="wb-pick-grip" title="拖动排序">⠿</span>' +
+        '<span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
+        '<span class="wb-pick-title">' + label + "</span>" +
+        '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+        '<button type="button" class="wb-pick-x" data-wb-x="' + esc(c.id) + '" title="移出队列">✕</button></span>' +
+        "</div>"
+      );
+    }).join("");
+    // 备选 = 没进队列、且未在执行（可点加入）；正在执行的 running 也放进备选区展示
+    // （带「某某 正在做」，不可点加入，仅作占用提示）。
+    var standby = WB.candidate.filter(function (c) {
+      return c.state === "running" || WB.dragPool.indexOf(c.id) === -1;
+    }).map(function (c) {
+      if (c.state === "running") {
+        return (
+          '<div class="wb-pick wb-standby wb-occupied" data-wb-id="' + esc(c.id) + '" title="已被人领走正在处理，暂不能加入队列；处理完会自动回到可选的备选卡">' +
+          '<span class="wb-pick-row"><span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
+          '<span class="wb-pick-title">' + esc(c.title) + "</span>" +
+          '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+          '<span class="wb-state-tag">处理中（' + esc(c.by || "他人") + " 在用）</span></span>" +
+          "</div>"
+        );
+      }
+      return (
+        '<div class="wb-pick wb-standby" data-wb-id="' + esc(c.id) + '" data-wb-add="' + esc(c.id) + '" title="点一下加入队列">' +
+        '<span class="wb-pick-row"><span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
+        '<span class="wb-pick-title">' + esc(c.title) + "</span>" +
+        '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+        '<span class="wb-queued">备选</span></span>' +
+        "</div>"
+      );
+    }).join("");
+    var group = '<div class="wb-group"><span class="wb-group-label">待执行队列（点卡片撤回备选 / 拖动排序）</span>' +
+      (queued || '<span class="workbench-empty">尚未排卡，点下方备选卡加入</span>') + "</div>";
+    if (standby) group += '<div class="wb-group"><span class="wb-group-label">备选（点卡片加入队列）</span>' + standby +
+      '<span class="wb-pool-foot"><span>全部未排队</span>' +
+      '<button type="button" class="btn" data-wb-addall>全部加入</button></span></div>';
+    pool.innerHTML = group;
+    // 拖动排序 + 移出
+    bindWbDrag(pool);
+    Array.prototype.forEach.call(pool.querySelectorAll("[data-wb-x]"), function (x) {
+      x.addEventListener("click", function () {
+        var id = x.getAttribute("data-wb-x");
+        var i = WB.dragPool.indexOf(id);
+        if (i > -1) WB.dragPool.splice(i, 1);
+        renderWorkbenchPool(pool);
+        workbenchRefreshModeBtn();
+        try { flowReorderCanvas(); } catch (err) {}
+      });
+    });
+    // 执行队列卡：点卡片本体回到备选（✕ 与拖把是分开的，不冲突）。
+    // 判定：点在卡片上、但不是 ✕/拖把；且没发生拖动（指针没位移）。
+    var wbClickedFrom = null, wbClickDidDrag = false;
+    Array.prototype.forEach.call(pool.querySelectorAll("[data-wb-x]"), function (x) {
+      var card = x.closest(".wb-pick");
+      if (!card) return;
+      card.addEventListener("mousedown", function () { wbClickedFrom = { x: 0, y: 0 }; wbClickDidDrag = false; });
+      card.addEventListener("dragstart", function () { wbClickDidDrag = true; });
+      card.addEventListener("click", function (e) {
+        if (wbClickDidDrag) return;                       // 刚拖过，不是点
+        if (e.target && (e.target.closest(".wb-pick-x") || e.target.closest(".wb-pick-grip"))) return; // 交给 ✕/拖把
+        var id = x.getAttribute("data-wb-x");
+        var i = WB.dragPool.indexOf(id);
+        if (i > -1) WB.dragPool.splice(i, 1);
+        renderWorkbenchPool(pool);
+        workbenchRefreshModeBtn();
+        try { flowReorderCanvas(); } catch (err) {}
+      });
+    });
+    // 备选卡点一下加入队列
+    Array.prototype.forEach.call(pool.querySelectorAll("[data-wb-add]"), function (add) {
+      add.addEventListener("click", function () {
+        var id = add.getAttribute("data-wb-add");
+        if (WB.dragPool.indexOf(id) === -1) WB.dragPool.push(id);
+        renderWorkbenchPool(pool);
+        workbenchRefreshModeBtn();
+        try { flowReorderCanvas(); } catch (err) {}
+      });
+    });
+    // 全部加入：把备选里所有卡一次收进队列
+    var addAll = pool.querySelector("[data-wb-addall]");
+    if (addAll) {
+      addAll.addEventListener("click", function () {
+        WB.dragPool.length = 0;
+        WB.dragPool = WB.candidate
+          .filter(function (c) { return c.state !== "running"; })
+          .map(function (c) { return c.id; });
+        renderWorkbenchPool(pool);
+        workbenchRefreshModeBtn();
+        try { flowReorderCanvas(); } catch (err) {}
+      });
+    }
+  }
+
+  // HTML5 鼠标拖动给 .wb-pick 排序：拖到哪张上面就把哪张的位置让给它。
+  var wbDragEl = null;
+  function bindWbDrag(pool) {
+    Array.prototype.forEach.call(pool.querySelectorAll(".wb-pick[draggable=true]"), function (card) {
+      card.addEventListener("dragstart", function (e) {
+        wbDragEl = card;
+        card.classList.add("wb-dragging");
+        e.dataTransfer && e.dataTransfer.effectAllowed && (e.dataTransfer.effectAllowed = "move");
+        try { e.dataTransfer.setData("text/plain", card.getAttribute("data-wb-id")); } catch (err) {}
+      });
+      card.addEventListener("dragend", function () {
+        wbDragEl = null;
+        card.classList.remove("wb-dragging");
+        Array.prototype.forEach.call(pool.querySelectorAll(".wb-drop-target"), function (t) { t.classList.remove("wb-drop-target"); });
+      });
+      card.addEventListener("dragover", function (e) {
+        e.preventDefault();
+        if (wbDragEl === card) return;
+        Array.prototype.forEach.call(pool.querySelectorAll(".wb-drop-target"), function (t) { t.classList.remove("wb-drop-target"); });
+        card.classList.add("wb-drop-target");
+        e.dataTransfer && e.dataTransfer.dropEffect && (e.dataTransfer.dropEffect = "move");
+      });
+      card.addEventListener("drop", function (e) {
+        var fromEl = wbDragEl;
+        if (!fromEl || fromEl === card) { card.classList.remove("wb-drop-target"); return; }
+        var fromId = fromEl.getAttribute("data-wb-id");
+        var toId = card.getAttribute("data-wb-id");
+        var fi = WB.dragPool.indexOf(fromId);
+        var ti = WB.dragPool.indexOf(toId);
+        if (fi > -1 && ti > -1 && fi !== ti) {
+          // 前/后都支持：来源卡原来在目标**前**（往后/下拉）→ 插到目标**后**；
+          // 来源卡原来在目标**后**（往前/上拉）→ 插到目标**前**。
+          var before = fi < ti;
+          WB.dragPool.splice(fi, 1);
+          ti = WB.dragPool.indexOf(toId); // 移除后再定位，避免索引漂移
+          WB.dragPool.splice(before ? ti + 1 : ti, 0, fromId);
+          renderWorkbenchPool(pool);
+          workbenchRefreshModeBtn();
+        }
+        card.classList.remove("wb-drop-target");
+      });
+    });
+  }
+
+  // 「开始执行」仅在队列非空且未在跑时可点。
+  function workbenchRefreshModeBtn() {
+    var start = WB.el && WB.el.querySelector("[data-wb-start]");
+    if (!start) return;
+    start.disabled = !WB.dragPool.length || WB.run;
+    // 「分析」同理：队列非空且在跑前可点（清空后重新加卡也能再分析）
+    var analyze = WB.el && WB.el.querySelector("[data-wb-analyze]");
+    if (analyze) analyze.disabled = !WB.dragPool.length || WB.run;
+    var sz = WB.el.querySelector("[data-wb-pool]");
+    if (sz) sz.setAttribute("data-count", WB.dragPool.length);
+  }
+
+  // 分析：调 serve 纯计算，给出串/并行建议，铺进下方步骤区供确认。
+  function workbenchAnalyze() {
+    if (!wbPresent()) return;
+    var ids = WB.dragPool || [];
+    if (!ids.length) { workbenchLog("请先把卡拖进队列。"); return; }
+    // 看板分批模式：把 dragPool 切成若干批，整批交给 Agent 自主处理。
+    // 分批是「并行」下的开关（界面只在并行时显示）——串行不叠加分批。
+    // 「每批 1 张」不退回旧并行：旧并行 cap=maxParallel 会同时放多张（用户选
+    // 「一张一张来」却看到两张）。1 走「多行队列 + 执行限速 cap=1」（见 workbenchPump）。
+    var viewMode = (WB.el.querySelector("input[name=wb-mode]:checked") || {}).value || "serial";
+    var useBatches = viewMode === "parallel" && (WB.batchMode || WB.batchSize > 1);
+    var body;
+    if (useBatches) {
+      var batches = [];
+      var bs = Math.max(1, WB.batchSize || 1);
+      for (var bi = 0; bi < ids.length; bi += bs) batches.push(ids.slice(bi, bi + bs));
+      body = { ids: ids.slice(), order: ids.slice(), batches: batches };
+    } else {
+      body = { ids: ids.slice(), order: ids.slice() };
+    }
+    postJson(wbUrl("api/workbench/analyze"), body, function (res, status) {
+      if (status !== 200 || !res || !res.ok) {
+        workbenchLog((res && res.error) || "分析失败");
+        return;
+      }
+      var stepsEl = WB.el.querySelector("[data-wb-steps]");
+      var runEl = WB.el.querySelector("[data-wb-run]");
+      if (!stepsEl || !runEl) return;
+      if (useBatches && res.batches) {
+        WB.batches = res.batches;
+        WB.mode = "parallel"; // 分批=批内可并行（Agent 自主规划批内）
+        // 把批拍平成 order，每张带 batch 序号；显示时按批分组。
+        WB.order = [];
+        res.batches.forEach(function (b, bi) {
+          b.cards.forEach(function (c, ci) {
+            WB.order.push({
+              id: c.id, title: c.title, prefix: c.prefix || "",
+              why: b.reason || "", batch: bi, batchPos: ci, batchN: b.cards.length,
+              active: false, done: false,
+            });
+          });
+        });
+        runEl.hidden = false;
+        runEl.querySelector("[data-wb-phase]").textContent = "分批执行 · 共 " + res.batches.length + " 批 · 整批交给 Agent 自主规划";
+        runEl.querySelector("[data-wb-progress]").textContent = "已选 " + res.total + " 件 · 待开始";
+        stepsEl.innerHTML = res.batches.map(function (b, bi) {
+          return '<li class="wb-batch" data-wb-batch="' + bi + '"><div class="wb-batch-head">第 ' + (bi + 1) +
+            " 批 · " + b.cards.length + " 卡<span class=\"wb-batch-reason\">" + esc(b.reason) + "</span></div><ol>" +
+            b.cards.map(function (c, ci) {
+              return '<li class="wb-step" data-wb-step="' + esc(c.id) + '"><span class="wb-step-i">' + (ci + 1) +
+                '</span><span class="wb-step-id">' + esc(c.id) + '</span><span class="wb-step-title">' + esc(c.title) + "</span></li>";
+            }).join("") + "</ol></li>";
+        }).join("");
+      } else {
+        // 旧模式：服务端给 serial/parallel，串/并行择一
+        WB.batches = null;
+        var mode = (WB.el.querySelector("input[name=wb-mode]:checked") || {}).value || "serial";
+        WB.mode = mode === "parallel" ? "parallel" : "serial";
+        var seq = WB.mode === "parallel" ? res.parallel : res.serial;
+        var order = seq.map(function (s) {
+          return { id: s.id, title: s.title, prefix: s.prefix, why: s.why || "", round: s.round || 0, active: false, done: false };
+        });
+        WB.order = order;
+        runEl.hidden = false;
+        if (WB.mode === "parallel") {
+          // 并行 = 多个任务队列：一路一行。卡在**行内横向**排（左→右=该路执行顺序），
+          // 多路队列**从上往下叠**。这段说明文字模块（phase/progress）整行隐藏。
+          runEl.classList.add("wb-run-parallel");
+          runEl.querySelector("[data-wb-phase]").textContent = "";
+          runEl.querySelector("[data-wb-progress]").textContent = "";
+          var lanes = [];
+          var byPrefix = {};
+          order.forEach(function (o) {
+            var p = o.prefix || "?";
+            if (!byPrefix[p]) { byPrefix[p] = []; lanes.push({ prefix: p, cards: byPrefix[p] }); }
+            byPrefix[p].push(o);
+          });
+          WB.lanes = lanes;
+          // 「每批 1 张」时，一路里第二张起其实是在排队 —— 执行上 cap=1 只放一张，
+          // 但界面上它和正在跑的那张长得一样，用户会读成「这条队列里有两个任务」。
+          // 所以这里给排队卡单独一个状态 + 一句「排队中 · 等 XXX」，让「在跑」和「在等」一眼可分。
+          // 只在每批 1 张时这么做：每批 >1 / 整批时整批卡是要一起交给 Agent 的，本来就该全列出来。
+          var oneByOne = !WB.batchMode && (WB.batchSize === undefined || WB.batchSize <= 1);
+          stepsEl.innerHTML = '<div class="wb-lanes">' + lanes.map(function (la, li) {
+            return '<div class="wb-lane" data-wb-lane="' + li + '">' +
+              '<div class="wb-lane-name">' + esc(la.prefix || "") + '</div>' +
+              '<ol class="wb-lane-cards">' + la.cards.map(function (o, i) {
+                // 同路第二张起 = 排队（前一张没跑完轮不到它），标出它在等谁。
+                var queued = oneByOne && i > 0;
+                var st = queued ? "wb-step-queued" : "wb-step-pending";
+                var waitNote = queued
+                  ? '<span class="wb-step-why">排队中 · 等 ' + esc(la.cards[i - 1].id) + '</span>'
+                  : "";
+                return '<li class="wb-step ' + st + '" data-wb-step="' + esc(o.id) + '"' +
+                  (queued ? ' data-wb-queued="1"' : '') + '>' +
+                  '<span class="wb-step-i">' + (i + 1) + '</span>' +
+                  '<span class="wb-step-id">' + esc(o.id) + '</span>' +
+                  '<span class="wb-step-title">' + esc(o.title) + '</span>' + waitNote + '</li>';
+              }).join("") + '</ol></div>';
+          }).join("") + '</div>';
+        } else {
+          runEl.classList.remove("wb-run-parallel");
+          runEl.querySelector("[data-wb-phase]").textContent = "串行执行";
+          runEl.querySelector("[data-wb-progress]").textContent = "已选 " + res.total + " 件 · 待开始";
+          stepsEl.innerHTML = order.map(function (s, i) {
+            return '<li class="wb-step" data-wb-step="' + esc(s.id) + '"><span class="wb-step-i">' +
+              (i + 1) + "</span><span class=\"wb-step-id\">" + esc(s.id) + "</span>" +
+              '<span class="wb-step-title">' + esc(s.title) + "</span>" +
+              '<span class="wb-step-why">' + esc(s.why || "") + "</span></li>";
+          }).join("");
+        }
+      }
+      // 分析完成 → 更新工作台顺序，并重画「右缘→下一张左缘」的顺序箭头。
+      // **不改动用户手动摆放的卡片位置**——画布顺序跟随工作台排好箭头即可。
+      try {
+        var analyzedIds = (WB.order || []).map(function (o) { return o.id; });
+        if (analyzedIds.length) {
+          (WB.dragPool || []).length = 0;
+          analyzedIds.forEach(function (x) { if (WB.dragPool.indexOf(x) === -1) WB.dragPool.push(x); });
+          flowDrawOrderEdges(analyzedIds);
+        }
+      } catch (err) { /* 不影响执行 */ }
+      workbenchLog("分析完成。" + (useBatches ? "卡已按 " + WB.batchSize + " 张/批分组，整批清单将一次性交给 Agent。" : "串行 / 并行两种建议已排好，确认后点「开始执行」。"));
+      var start = WB.el.querySelector("[data-wb-start]");
+      start.disabled = false;
+    });
+  }
+
+  // 开始执行：按 order 跑。串行一次一件；并行一次放多件（不同区域）。
+  // 分批模式：逐批跑——claim 完整批→一次 ask 携整批清单→release 完整批。
+  function workbenchStart() {
+    if (!wbPresent() || WB.run) return;
+    if (!WB.order.length) { workbenchAnalyze(); return; }
+    // 并行 + 分批粒度 >1（或整批）→ 分批执行（批次列表 + 整批交给 Agent 自主）。
+    // 「每批 1 张 / 不分批」不进这里：走 workbenchPump，cap 由 batchSize 限为 1。
+    if (WB.mode === "parallel" && (WB.batchMode || WB.batchSize > 1)) { workbenchStartBatches(); return; }
+    WB.run = true;
+    WB.stop = false;
+    var start = WB.el.querySelector("[data-wb-start]");
+    var stopBtn = WB.el.querySelector("[data-wb-stop]");
+    var analyze = WB.el.querySelector("[data-wb-analyze]");
+    if (start) start.disabled = true;
+    if (stopBtn) stopBtn.disabled = false;
+    if (analyze) analyze.disabled = true;
+    WB.inflight = {};
+    WB.doneCount = 0;
+    WB.execOrder = [];
+    workbenchLog("开始" + (WB.mode === "parallel" ? "并行" : "串行") + "执行。");
+    workbenchPump();
+  }
+
+  // 分批执行主循环：按顺序逐批推进。一批=claim 所有卡→一次 ask（整批清单）
+  // →让 Agent 自主规划批内怎么处理→release 所有卡。批与批之间串行。
+  function workbenchStartBatches() {
+    if (!wbPresent() || WB.run) return;
+    WB.run = true;
+    WB.stop = false;
+    WB.inflight = {};
+    WB.doneCount = 0;
+    WB.execOrder = [];
+    var start = WB.el.querySelector("[data-wb-start]");
+    var stopBtn = WB.el.querySelector("[data-wb-stop]");
+    var analyze = WB.el.querySelector("[data-wb-analyze]");
+    if (start) start.disabled = true;
+    if (stopBtn) stopBtn.disabled = false;
+    if (analyze) analyze.disabled = true;
+    workbenchLog("开始分批执行：整批交给 Agent 自主规划。");
+    pumpBatch(0);
+  }
+
+  // 处理某一批（batchIndex）。claim 全部成功→一次 ask→release→下一批。
+  function pumpBatch(batchIndex) {
+    if (!WB.run) return;
+    if (WB.stop) { workbenchFinish("已停止"); return; }
+    var all = WB.order;
+    var batchCards = all.filter(function (o) { return o.batch === batchIndex; });
+    if (!batchCards.length) {
+      // 没有这个批 = 全跑完
+      if (all.every(function (o) { return o.done; })) workbenchFinish("全部执行完成");
+      else workbenchPumpBatchFallback(batchIndex);
+      return;
+    }
+    // 标记本批 whole 进度
+    var bEl = WB.el.querySelector('[data-wb-batch="' + batchIndex + '"]');
+    var cards = batchCards.slice();
+    var claimDone = 0;
+    var claimed = [];
+    // 逐张 claim（不动用并行，逐批内顺序 claim 保证互斥安全）
+    function claimNext(i) {
+      if (!WB.run) return;
+      if (i >= cards.length) { askBatch(batchIndex, cards, claimed); return; }
+      var c = cards[i];
+      var id = c.id;
+      var stepEl = findWbStep(id);
+      claimForWorkbench(id, function (ok, status, why) {
+        if (!WB.run) return;
+        if (!ok) {
+          workbenchMark(stepEl, "wait", "未开工（" + ((why || "").slice(0, 40)) + "）");
+          workbenchLog("「" + id + "」还没就绪（" + (why || status) + "），稍后重试该批。");
+          setTimeout(function () { if (WB.run) pumpBatch(batchIndex); }, 1500);
+          return;
+        }
+        workbenchMark(stepEl, "asking", "已领·批内处理");
+        claimed.push(c);
+        claimNext(i + 1);
+      });
+    }
+    claimNext(0);
+
+    // 整批 claim 完 → 一次 ask 携带整批清单 → release 全部 → 下一批
+    function askBatch(bi, batchC, claimedC) {
+      if (!WB.run) return;
+      var listText = batchC.map(function (c) {
+        var id = c.id;
+        return "- " + id + " " + (c.title || "");
+      }).join("\n");
+      var ledgerPath = harnessEnv() ? harnessEnv().dir : "";
+      // 整批清单一次性交给 Agent，让它在批内自主规划顺序 / 是否并发。
+      var text =
+        "自动工作台正在执行你负责看板里的一批任务（共 " + batchC.length + " 张卡）。\n" +
+        "这一批是你（看板）划分的「可并行」批：请你拿到整批清单后自主规划——\n" +
+        "   · 决定批内先处理哪张、哪些可以一起推进（如需并行，你能同时处理就同时处理）；\n" +
+        "   · 逐张真的去处理，并把每张在台账 ledger.json 里收口（从 board.config.json 车道 stages 取收口状态，\n" +
+        "     bug→fixed/closed、feature→shipped、risk→resolved/accepted，或至少推进到靠后阶段），让队列能往下走。\n\n" +
+        "台账文件在：" + (ledgerPath || "（当前看板目录）") + "\\ledger.json\n" +
+        "本批卡片清单：\n" + listText + "\n\n" +
+        "这是真实执行，不是分析建议：请实际处理并更新台账，处理完简要回报你动过的每张卡和它现在的状态。";
+      var fresh = true, inline = true;
+      var finished = false;
+      harnessPostWithCapture("本批 " + batchC.length + " 卡", text, fresh, function (result) {
+        if (finished) return;
+        if (!result.ok) {
+          finished = true;
+          workbenchLog("本批发送失败：" + ((result && result.error) || "未知错误"));
+          finishBatch(bi, batchC, claimedC, { ok: false, error: (result && result.error) || "发送失败" });
+          return;
+        }
+        var askId = result.askId || "";
+        WP_ANSWERS[askId] = {
+          by: WB.by || flowActor(),
+          resolve: function (payload) {
+            if (finished) return;
+            finished = true;
+            delete WP_ANSWERS[askId];
+            finishBatch(bi, batchC, claimedC, { ok: !payload.error, text: payload.text || "", error: payload.error || "" });
+          },
+        };
+        setTimeout(function () {
+          if (!finished) { finished = true; delete WP_ANSWERS[askId]; finishBatch(bi, batchC, claimedC, { ok: false, error: "等 Harness 回答超时" }); }
+        }, 300000);
+      }, null, inline, "", fresh);
+    }
+
+    // 本批收尾：无论成功/失败，逐张 release；记 done；进度；进下一批。
+    function finishBatch(bi, batchC, claimedC, res) {
+      if (!WB.run) return;
+      var okAsk = res.ok;
+      var verdict = okAsk ? (res.text || "（无文字结论）") : (res.error || "处理未成功");
+      batchC.forEach(function (c, ci) {
+        var stepEl = findWbStep(c.id);
+        var done = ci < claimedC.length; // 是否真的 claim 到了（本批全部 claim 才算 Ask 过）
+        if (okAsk) workbenchMark(stepEl, "done", (verdict.slice(0, 90)));
+        else workbenchMark(stepEl, "wait", (verdict.slice(0, 90)));
+      });
+      workbenchLog("第 " + (bi + 1) + " 批：" + (okAsk ? "Agent 处理完成" : "处理失败——" + verdict.slice(0, 60)));
+      // release 本批已 claim 的
+      var rel = claimedC.slice();
+      function releaseAll(k) {
+        if (!WB.run) return;
+        if (k >= rel.length) {
+          // 全部 release 完 → 标记本批 done、更新进度、进下一批
+          rel.forEach(function (c) {
+            var id = c.id;
+            var rec = WB.order.filter(function (x) { return x.id === id; })[0];
+            if (rec) { rec.done = true; rec.active = false; }
+            delete WB.inflight[id];
+          });
+          WB.doneCount = WB.order.filter(function (o) { return o.done; }).length;
+          updateWbProgress();
+          if (!WB.run) return;
+          pumpBatch(bi + 1);
+          return;
+        }
+        var c = rel[k];
+        releaseForWorkbench(c.id, WB.by || flowActor(), function () { releaseAll(k + 1); });
+      }
+      releaseAll(0);
+    }
+  }
+
+  // 批处理兜底（极少发生）：批号断层时按旧 pump 收尾。
+  function workbenchPumpBatchFallback(bi) {
+    var rest = WB.order.filter(function (o) { return !o.done; });
+    if (rest.length) {
+      rest.forEach(function (o) {
+        var stepEl = findWbStep(o.id);
+        workbenchMark(stepEl, "wait", "跳过");
+      });
+      workbenchFinish("有批次未完成");
+    } else {
+      workbenchFinish("全部执行完成");
+    }
+  }
+
+  // 推进一步 / 若干步。
+  //
+  // 核心循环：只要还没停、没到上限（并行模式下同时放行到 maxParallel 路），
+  // 就挑「还没跑、且现在可领」的卡 launch：claim → 交给 Harness → release。
+  // 串行 cap=1 一次一件；并行 cap=maxParallel 一次放多件（不同区域）。
+  //
+  // ⚠️ 关键语义：flow.mjs 里一张卡要真的「做完」才能让同区域下一件顶上 ——
+  // 这个「做完」= 它在台账里的状态收口（离开未收口集合），不是 release。
+  // 所以工作台交给 Harness 的 prompt 会要求它「处理并更新台账（收口/推进状态）」。
+  // 单张卡 release 只是把占用还给系统；链能否继续，取决于卡是否真的被收口。
+  function workbenchPump() {
+    if (!WB.run) return;
+    if (WB.stop) { workbenchFinish("已停止"); return; }
+
+    // 上限 = 同时放行几张：
+    //   · 串行 → 1
+    //   · 并行 + 「一次喂几张 = 每批 1 张（含默认/不分批）」→ 1（真正一张一张来，绝不两张同时）
+    //   · 并行 + 每批 >1 或整批 → 不进这里（workbenchStart 走分批执行）
+    var cap = 1;
+    if (WB.mode === "parallel" && (WB.batchSize === undefined || WB.batchSize <= 1)) cap = 1;
+    else if (WB.mode === "parallel") cap = (WB.steps && WB.steps.maxParallel) || 3;
+
+    // 发起一张卡：claim → 交给 Harness → release。
+    function launch(next) {
+      var id = next.o.id;
+      var stepEl = findWbStep(id);
+      next.o.active = true;
+      next.o.orderN = (WB.execOrder || []).length;
+      if (WB.execOrder) WB.execOrder.push(id);
+      WB.inflight[id] = next.o;
+      claimForWorkbench(id, function (ok, status, why) {
+        if (!WB.run) return;
+        if (!ok) {
+          // 409（在排队 / 同区域被占 / 被人抢走）：此刻不能开工。
+          next.o.active = false;
+          delete WB.inflight[id];
+          if (next.o.badTries === undefined) next.o.badTries = 0;
+          next.o.badTries += 1;
+          workbenchMark(stepEl, "wait", "未开工（第 " + next.o.badTries + " 次）：" + ((why || "").slice(0, 40)));
+          if (next.o.badTries <= 8) {
+            workbenchLog("「" + id + "」还没就绪（" + (why || status) + "），稍后重试。");
+            setTimeout(function () { if (WB.run) workbenchPump(); }, 1500);
+          } else {
+            workbenchLog("「" + id + "」多次领不到（" + (why || status) + "），先搁置。");
+          }
+          return;
+        }
+        workbenchMark(stepEl, "asking", "处理中");
+        var beforeStatus = (D.items[id] && D.items[id].status) || "";
+        workbenchAsk(itemTitle(id), function (res) {
+          var okAsk = res && res.ok;
+          var verdict = okAsk ? (res.text || "（无文字结论）") : (res && res.error) || "拿不到回答";
+          // 问完后回读台账，确认这张卡有没有真的收口/推进 —— 只拿到回答不算数，
+          // 同区域下一张卡能不能接上取决于状态是否动过（flow.mjs 只认「离开未收口集合」）。
+          var prev = beforeStatus;
+          function finishVerdict(afterStatus, note) {
+            var moved = afterStatus !== prev;
+            var closed = moved && !isOpenWbStatus(afterStatus);
+            var tail = closed ? " · 已收口" : (moved ? " · 状态：'" + prev + "'→'" + afterStatus + "'" : " · 仍在 " + (afterStatus || prev) + "，未收口");
+            workbenchMark(stepEl, okAsk ? "done" : "wait", (verdict.slice(0, 90) + tail).slice(0, 140));
+            workbenchLog("「" + id + "」" + (okAsk ? "处理完成" : "处理未成功") + tail + "：" + verdict.slice(0, 60));
+            if (okAsk && moved && !closed) workbenchLog("「" + id + "」推进到 " + afterStatus + "，同区域下一张应可接上。");
+            if (okAsk && !moved && note) workbenchLog(note);
+          }
+          getLedgerBoard(function (lr, lstatus) {
+            var afterStatus = (lr && lr.items && lr.items[id] && lr.items[id].status) || "";
+            finishVerdict(afterStatus, "");
+          });
+          var by = (res && res.by) || WB.by || flowActor();
+          releaseForWorkbench(id, by, function (releaseOk) {
+            next.o.done = true;
+            next.o.result = verdict;
+            next.o.active = false;
+            delete WB.inflight[id];
+            WB.doneCount += 1;
+            updateWbProgress();
+            if (!WB.run) return;
+            setTimeout(function () { if (WB.run) workbenchPump(); }, 400);
+          });
+        }, wbConvKey(id));
+      });
+    }
+
+    // 每一轮把「现在可开工」的卡尽量放满 cap：
+    // 串行 = 每轮一件、按 order；并行 = 每轮多件、不同前缀、按 round 交错。
+    // 互斥仍由 serve 的 claim 保证；这里尽量少撞 409。
+    for (;;) {
+      var activeCount = WB.order.filter(function (o) { return o.active; }).length;
+      if (activeCount >= cap) break;                    // 满了，等回收
+      var rest = WB.order.map(function (o, idx) { return { o: o, idx: idx }; })
+        .filter(function (x) { return !x.o.done && !x.o.active; });
+      if (!rest.length) {
+        if (WB.order.every(function (o) { return o.done; })) workbenchFinish("全部执行完成");
+        else if (activeCount === 0) workbenchFinish("没更多可开工的卡");
+        break;
+      }
+      rest.sort(function (a, b) { return (a.o.round || 0) - (b.o.round || 0) || a.idx - b.idx; });
+      var next = null;
+      for (var i = 0; i < rest.length; i++) {
+        var cand = rest[i];
+        if (WB.mode === "serial") { next = cand; break; }
+        var blocker = WB.order.some(function (o) {
+          return o.prefix === cand.o.prefix && o.id !== cand.o.id && !o.done && (o.round || 0) < (cand.o.round || 0);
+        });
+        if (!blocker) { next = cand; break; }
+      }
+      if (!next) {
+        if (activeCount === 0) workbenchFinish("同轮互斥，暂无法推进");
+        break;
+      }
+      launch(next);
+    }
+  }
+
+  // 领一件（复用 /api/flow/claim）。记录 WB.by 供交还用。
+  function isOpenWbStatus(status) {
+    // 与 flow.mjs 的 OPEN_STATUSES 保持一致：这些状态视为「未收口」。
+    var open = ["open", "doing", "verify", "watch", "planned", "review", "watching", "mitigating"];
+    return open.indexOf(String(status || "")) > -1;
+  }
+
+  function getLedgerBoard(done) {
+    // /api/board 返回当前 ledger.json 原文（{items,history,...}）。
+    getJson(wbUrl("api/board"), function (res, status) {
+      done(res && res.items ? res : null, status);
+    });
+  }
+
+  function claimForWorkbench(id, done) {
+    postJson(flowUrl("claim"), { id: id, by: flowActor() }, function (res, status) {
+      if (status === 200 && res && res.ok) { WB.by = res.by || flowActor(); done(true, status); return; }
+      done(false, status, (res && res.error) || "");
+    });
+  }
+
+  function releaseForWorkbench(id, by, done) {
+    postJson(flowUrl("release"), { id: id, by: by }, function (res, status) {
+      done && done(status === 200);
+    });
+  }
+
+  // 把一张卡交给 Harness，按 askId 收回答。支持并发：多个 ask 同时挂着，
+  // 谁回来谁触发自己的回调 —— 用 WP_ANSWERS[askId] 对应每一个。
+  var WP_ANSWERS = {};
+  // 并行「路」模式下，每张卡归属哪一路 → 会话键=该路。同一路的卡都复用
+  // 同一个会话键，所以左侧会话列表一条路一条对话；非并行（无 lanes）返回空。
+  function wbConvKey(id) {
+    if (!WB.lanes || !WB.lanes.length) return "";
+    for (var i = 0; i < WB.lanes.length; i++) {
+      for (var j = 0; j < WB.lanes[i].cards.length; j++) {
+        if (WB.lanes[i].cards[j].id === id) return "路" + (i + 1) + " · " + WB.lanes[i].prefix;
+      }
+    }
+    return "";
+  }
+  // convKey：并行按「路」执行时，同一路的卡共用同一个会话键（左侧会话列表就
+  // 是每路一条对话）。缺省 convKey=空 → 每张卡各自一个会话（按卡 id 圈定）。
+  function workbenchAsk(itemTitle, done, convKey) {
+    if (!harnessEnv()) { done({ ok: false, error: "要在 Harness 里打开才能问 AI" }); return; }
+    var env = harnessEnv();
+    var ledgerPath = env && env.dir ? env.dir : "";
+    // 会话键：有 convKey 就用它（并行=每路一条独立对话）；否则回落成卡 id。
+    var convTitle = convKey || itemTitle;
+    // itemTitle 形如「OPS-022 · 标题」，前半就是卡 id，供它去 ledger.json 里定位。
+    var cleanId = String(itemTitle || "").split("·")[0].trim() || "";
+    var text =
+      "自动工作台正在逐张处理队列你负责的看板卡【" + itemTitle + "】。\n" +
+      "这是真实执行，不是分析建议：请实际去处理这条卡并更新台账，让队列能往下走。\n\n" +
+      "台账文件在：" + (ledgerPath || "（当前看板目录）") + "\\ledger.json（卡片 id：" + cleanId + "）。\n" +
+      "要求：\n" +
+      "1) 先读 ledger.json，定位 " + cleanId + " 这条卡（也在 board.config.json 里确认它的车道 lane 与阶段 stages）；\n" +
+      "2) 实际动手解决它（排查/修改/清理/更新），拿真实证据，不要只给空泛建议；\n" +
+      "3) 处理完把这条卡在 ledger.json 里的状态收口：从 board.config.json 里该车道的 stages 取一个「未列在 stages 的收口状态」（如 bug 车道 fixed/closed、feature 车道 shipped、risk 车道 resolved/accepted），把 status 改成它，或至少推进到相对靠后的阶段；\n" +
+      "4) 简要回报你做了什么、改动了什么、这条卡现在的状态。\n" +
+      "不要跳过处理直接写建议 —— 队列里同区域的下一张卡正等这一张真正收口才能开工。";
+    var fresh = true;
+    var inline = true;
+    var askId = "";
+    var finished = false;
+    var by = WB.by || flowActor();
+    harnessPostWithCapture(convTitle, text, fresh, function (result) {
+      if (!result.ok) {
+        if (!finished) { finished = true; done({ ok: false, error: result.error || "发送失败" }); }
+        return;
+      }
+      askId = result.askId || "";
+      // 注册这个 askId 的回答回调
+      WP_ANSWERS[askId] = {
+        by: by,
+        resolve: function (payload) {
+          if (finished) return;
+          finished = true;
+          delete WP_ANSWERS[askId];
+          done({ ok: !payload.error, text: payload.text || "", error: payload.error || "", by: by });
+        },
+      };
+      // 兜底超时
+      setTimeout(function () {
+        if (!finished) { finished = true; delete WP_ANSWERS[askId]; done({ ok: false, error: "等 Harness 回答超时", by: by }); }
+      }, 240000);
+    }, null, inline, "", fresh);
+  }
+
+  function workbenchAskListener(event) {
+    if (event.origin !== window.location.origin) return;
+    var d = event.data;
+    if (!d || d.type !== "ops-board/answer") return;
+    var rec = WP_ANSWERS[d.askId];
+    if (rec) rec.resolve(d);
+  }
+  window.addEventListener("message", workbenchAskListener);
+
+  // 简化版 harnessPost：直接构造 payload 调 /ops-board/ask，不碰 AI 面板状态。
+  function harnessPostWithCapture(itemTitle, text, fresh, done, skillName, inline, reuseSessionId, withContext) {
+    var env = harnessEnv();
+    var askId = "ask-w-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
+    var payload = {
+      board: env.id,
+      dir: env.dir,
+      label: env.label,
+      item: itemTitle,
+      title: itemTitle,
+      fresh: !!fresh,
+      askId: askId,
+      reuseSessionId: reuseSessionId || "",
+      inline: !!inline,
+      surface: "page",
+      question: harnessContext(itemTitle, text, skillName, withContext),
+    };
+    fetch("/ops-board/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        done({ ok: !!(j && j.ok), askId: askId, error: (j && j.error) || "" });
+      })
+      .catch(function (e) {
+        done({ ok: false, error: String((e && e.message) || e) });
+      });
+  }
+
+  function updateWbProgress() {
+    var prog = WB.el && WB.el.querySelector("[data-wb-progress]");
+    if (!prog) return;
+    var doneN = WB.order.filter(function (o) { return o.done; }).length;
+    var totalN = WB.order.length;
+    var activeN = WB.order.filter(function (o) { return o.active; }).length;
+    prog.textContent = doneN + " / " + totalN + " 已完成" + (activeN ? " · " + activeN + " 在跑" : "");
+  }
+
+  function workbenchMark(stepEl, cls, note) {
+    if (!stepEl) return;
+    // 也清掉「排队中」：这张卡一旦真的轮到它跑，虚线边和「等 XXX」就不再成立。
+    stepEl.classList.remove("wb-step-pending", "wb-step-running", "wb-step-asking", "wb-step-done", "wb-step-skip", "wb-step-wait", "wb-step-queued");
+    if (stepEl.getAttribute("data-wb-queued")) stepEl.removeAttribute("data-wb-queued");
+    stepEl.classList.add("wb-step-" + cls);
+    if (note) {
+      var why = stepEl.querySelector(".wb-step-why");
+      if (why) why.textContent = note;
+    }
+    var prog = WB.el && WB.el.querySelector("[data-wb-progress]");
+    var doneN = WB.order.filter(function (o) { return o.done; }).length;
+    var totalN = WB.order.length;
+    if (prog) prog.textContent = doneN + " / " + totalN + " 已完成";
+  }
+
+  function workbenchFinish(reason) {
+    WB.run = false;
+    var stopBtn = WB.el && WB.el.querySelector("[data-wb-stop]");
+    var start = WB.el && WB.el.querySelector("[data-wb-start]");
+    var analyze = WB.el && WB.el.querySelector("[data-wb-analyze]");
+    if (stopBtn) stopBtn.disabled = true;
+    var prog = WB.el && WB.el.querySelector("[data-wb-progress]");
+    if (prog) prog.textContent = reason;
+    if (start) start.disabled = true;
+    if (analyze) analyze.disabled = false;
+    workbenchLog("工作台：" + reason);
+  }
+
+  function workbenchStop() {
+    WB.stop = true;
+    workbenchLog("停止请求已发，将在当前这张卡跑完后停下。");
+  }
+
+  function workbenchLog(msg) {
+    // 落到步骤区顶部的一行「状态日志」，不弹窗
+    var head = WB.el && WB.el.querySelector("[data-wb-phase]");
+    if (head && typeof msg === "string") {
+      var span = document.createElement("span");
+      span.className = "wb-log";
+      span.textContent = msg;
+      head.appendChild(span);
+    }
+  }
+
+  function findWbStep(id) {
+    return WB.el && WB.el.querySelector('[data-wb-step="' + id + '"]');
+  }
+
+  function itemTitle(id) {
+    var it = D.items && D.items[id];
+    return it ? (it.title || id) : id;
+  }
+
+  // 初始化：铺一次候选池；radio 切换刷新按钮态。
+  if (wbPresent()) {
+    workbenchRefresh();
+    var wbModes = WB.el.querySelectorAll("input[name=wb-mode]");
+    Array.prototype.forEach.call(wbModes, function (r) {
+      r.addEventListener("change", function () {
+        workbenchRefreshModeBtn();
+      });
+    });
+    // 分批粒度：用户选 <select data-wb-batch-size> → 写入 WB.batchSize/batchMode。
+    var wbBatchSel = WB.el.querySelector("[data-wb-batch-size]");
+    if (wbBatchSel) {
+      wbBatchSel.addEventListener("change", function () {
+        var v = Number(wbBatchSel.value);
+        WB.batchSize = v === -1 ? 99999 : (v || 1);
+        WB.batchMode = v === -1;
+        workbenchLog("分批已设：" + (v === -1 ? "整批全交（一批全部卡交给一个 Agent 自主处理）" : v === 1 ? "每批 1 张（一张一张来，同时只在跑一张）" : "每批 " + WB.batchSize + " 张，整批交给 Agent 自主规划。"));
+      });
+    }
+  }
+
+  // 流程图节点可拖拽：拖动卡到另一张上方 = 把执行顺序调成「拖的在前、目标在后」。
+  // 图和候选池共用 WB.dragPool，拖流程图就是在排工作台的执行顺序。
+  // （rbindFlowDrag 里引用的函数都是 hoisted 声明，放哪都能用；必须在节点已渲染后调用。）
+  bindFlowDrag();
+  // 暴露给测试：重排分区画布
+  window.__wbReorderCanvas = flowReorderCanvas;
 
   // ─────────────────────── AI 面板 ───────────────────────
 
@@ -495,13 +2524,32 @@
     ctx: null,
     skill: null, // 点了某个 skill 的「问 AI」时，这里放 skill 名
     skillScope: false, // 是不是在 Skill 页打开的面板（整页 skill，未指定单条）
+    // 风险审核：作用域是「风险车道」，和整本台账不是一回事。
+    // 光靠 ctx 表达不了 —— 风险审核的 ctx 是空的，会和整本台账撞同一个
+    // 会话键（chatStoreKey / sessionKey 都按 ctx || "__global__" 算），
+    // 两边的历史会串在一起。所以单独记一个标记。
+    riskScope: false,
     busy: false,
-    fresh: false, // 面板里点了「新会话」：下一条发送强制新建 Harness 会话
+    fresh: false, // 是否新开会话（由面板上的单选决定，不再靠隐含状态）
+    reuseId: "", // 选中的旧会话 id；空表示没选
+    sessions: [], // 当前作用域下可继续的会话列表
+    shownId: "", // 屏幕上这批消息来自哪条会话（未知时为空）
   };
+
+  // 内联回答：哪些 askId 还在等回答，以及它们对应哪条「正在回答」气泡。
+  // 值是该气泡的 body 元素，收到回答时直接往里写。
+  var PENDING = {};
+  // 等 Harness 回历史请求的回调：reqId -> fn(payload)
+  var HISTORY_WAIT = {};
+  // 历史请求的「代数」。开面板时会先按映射表要一次，随后认领到本条目自己的
+  // 会话又要一次；两次都在飞的时候，先发的那次可能后回来，把后发的正确内容冲掉。
+  // 每次发请求 +1，回调里只认最后一次，早于它的一律丢弃。
+  var HISTORY_GEN = 0;
 
   function ctxLabel() {
     if (AI.skill) return "Skill · " + AI.skill;
     if (AI.skillScope) return "整页 Skill";
+    if (AI.riskScope) return "风险审核 · 只审风险车道";
     if (!AI.ctx) return "整本台账";
     var it = D.items[AI.ctx];
     return it ? AI.ctx + " · " + it.title : "整本台账";
@@ -596,17 +2644,84 @@
     },
   ];
 
+  // 风险审核：作用域是「风险车道」的这几个条目。
+  // 动作围绕"审"——判断还成不成立、要不要提前处置，而不是笼统总结项目。
+  var HARNESS_RISK_QUICK = [
+    {
+      label: "审核这些风险",
+      prompt:
+        "只审这本台账里还没收口的风险条目：逐条判断它现在是否仍然成立、有没有被新的进展改变、严重度和时点判断是否还准。每条给一句结论（成立 / 已缓解 / 已过期 / 需要升级处理），并说明依据。不要改 ledger.json。",
+    },
+    {
+      label: "哪条最该先处理",
+      prompt:
+        "在这些未收口的风险里排出处理优先级：按「真出问题的损失 × 现在还剩多少时间」排序，说清每条为什么排在这个位置、最晚什么时候必须动手。只给判断和依据，不要直接改台账。",
+    },
+    {
+      label: "找出没记进来的风险",
+      prompt:
+        "对照项目当前的实际状态（代码、依赖、线上配置、到期时间、额度、外部依赖），找出这本台账的风险条目里没有记、但确实存在的风险；逐条说明是什么、为什么会出事、现在有什么迹象。不要直接写进 ledger.json，先给清单。",
+    },
+    {
+      label: "只报告，不改台账",
+      prompt:
+        "通读未收口的风险条目，报告它们的现状：哪些还有效、哪些已经过期、哪些描述得不够具体到能判断。这一轮不要修改任何文件。",
+    },
+  ];
+
   // 三个作用域各自拼自己的上下文，不再共用一个 else 分支。
   //
   // 之前条目和整本共用 else，而那个 else 只写了 skill 的话术：点某条台账的
   // 「问 AI」，发出去的是「范围：本页全部 Skill（共 0 个）」加一句「skill 文件是
   // SKILL.md」，那条台账的四段和证据一个字都没带上，连编号都没有。
-  function harnessContext(itemId, actionText, skillName) {
+  // 拼「这一轮要发给 AI 的文本」。
+  //
+  // withContext=false 时只返回用户这句话本身：会话里已经有上下文了，再重发一遍
+  // 只是把真正的问题淹掉。真正需要交代背景的只有「会话的第一句」——那一次要把
+  // 看板位置、作用域、条目原文、回答规则都讲清楚，后面几轮 AI 还记得。
+  // 风险车道里还没收口的条目。
+  //
+  // board-data 里的 items 每项带 laneLabel / statusLabel，够筛了，不用另开字段。
+  // 「收口」的判据按状态文案认：已修复 / 已关闭 / 暂停 这三种在台账里是收口态，
+  // 其余（观察中 / 缓解中 / 待评估…）都还算没处理完。
+  // 这样不依赖某个项目配置里 stage 的具体写法，换项目也不会筛错。
+  var CLOSED_STATUS = ["已修复", "已关闭", "暂停", "已解决", "已上线"];
+
+  function isClosedStatus(label) {
+    var s = String(label || "");
+    for (var i = 0; i < CLOSED_STATUS.length; i += 1) {
+      if (s.indexOf(CLOSED_STATUS[i]) === 0) return true;
+    }
+    return false;
+  }
+
+  function riskItems() {
+    var out = [];
+    var items = D.items || {};
+    for (var id in items) {
+      if (!Object.prototype.hasOwnProperty.call(items, id)) continue;
+      var it = items[id];
+      if (!it || it.laneLabel !== "风险") continue;
+      if (isClosedStatus(it.statusLabel)) continue;
+      out.push(it);
+    }
+    return out;
+  }
+
+  function harnessContext(itemId, actionText, skillName, withContext) {
     var it = itemId ? D.items[itemId] : null;
     var skills = D.skills || { used: [], produced: [], related: [] };
-    var head = ["看板：" + D.project + "（" + HARNESS.dir + "）", HARNESS.projectDir ? "项目目录：" + HARNESS.projectDir : null];
-    var lines;
 
+    // 只有第一句才带背景。后续提问原样发出，不加任何前缀。
+    if (!withContext) return actionText;
+
+    // 看板位置：dir 与 projectDir 常常是同一个目录，同值就只写一行，别把同一串路径写两遍。
+    var dir = harnessEnv().dir;
+    var projectDir = harnessEnv().projectDir;
+    var head = ["看板：" + D.project + "（" + dir + "）"];
+    if (projectDir && projectDir !== dir) head.push("项目目录：" + projectDir);
+
+    var lines;
     if (skillName) {
       // 单条 skill：把这条的路径和元信息带上，agent 不用自己猜是哪个文件，
       // 也不用去翻别的 skill —— 作用域就是这一个文件。
@@ -643,11 +2758,30 @@
       if (it.updatedAt) lines.push("最近更新：" + it.updatedAt);
       if (it.sections) lines.push("", "四段记录：", it.sections);
       if (it.evidence) lines.push("", "留下的证据：", it.evidence);
+    } else if (itemId === "__risks__") {
+      // 风险审核：作用域是风险车道里还没收口的几条，把它们的原文直接摆出来。
+      // 只给一句「审一下风险」的话，agent 还得自己去 ledger.json 里翻，
+      // 翻漏了也不会有人知道。这里给全，它才能逐条判。
+      lines = head.slice();
+      var risks = riskItems();
+      lines.push("范围：只审这本台账里未收口的风险条目，共 " + risks.length + " 条；其它车道（问题、需求）不在这次范围内。");
+      lines.push("", "未收口的风险：");
+      for (var r = 0; r < risks.length; r += 1) {
+        var ri = risks[r];
+        lines.push(
+          "",
+          "【" + ri.id + "】" + ri.title,
+          "状态：" + ri.statusLabel + (ri.severityText ? "　" + ri.severityText : "") + (ri.area ? "　区域：" + ri.area : ""),
+          ri.sections || "",
+          ri.evidence ? "证据：\n" + ri.evidence : ""
+        );
+      }
+      lines.push("", "要核对细节或看已收口的风险，读 " + dir + "/ledger.json。");
     } else {
       // 整本台账：没有具体条目，说清是整本。
       lines = head.slice();
       lines.push("范围：整本台账，共 " + (D.totalCount || 0) + " 条，未收口 " + (D.openCount || 0) + " 条。");
-      lines.push("用户没有指定某一条，回答时可以点出具体编号；需要细节就读 " + HARNESS.dir + "/ledger.json。");
+      lines.push("用户没有指定某一条，回答时可以点出具体编号；需要细节就读 " + dir + "/ledger.json。");
     }
 
     // 回答规则来自 board.config.json 的 ask.systemPrompt，项目自己定。
@@ -678,20 +2812,61 @@
       .join("\n");
   }
 
-  function harnessPost(itemId, actionText, fresh, done, skillName) {
+  function harnessPost(itemId, actionText, fresh, done, skillName, inline, reuseSessionId, withContext) {
     var it = itemId ? D.items[itemId] : null;
     var skillKey = skillName || null;
+    // askId 用来把「这次提问」和「回来的回答」对上。
+    // 面板可能连着问好几次，回答是异步回来的，没有这个 id 就分不清谁是谁。
+    //
+    // 中间那一位 c/p 是「哪个窗口问的」：c = 独立对话窗，p = 整页看板。
+    // 为什么要塞进 id 里，而不是只靠 surface 字段：surface 要在 Host 的
+    // /ops-board/ask 里过一道手（发给所有打开的 Harness 页），而 Host 那半边
+    // 是插件代码，改完必须重启应用才生效。把来源编进 askId 之后，
+    // 即使 Host 还是旧版、把 surface 丢了，插件也能从 id 里读回来 ——
+    // 刷新一下页面就够，不用为了一个字段重启。
+    var tag = SURFACE === "chat" ? "c" : "p";
+    var askId = "ask-" + tag + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+    // 直接开在看板端口上的页面没有这个对象 —— 那种页面本来也问不了 AI，
+    // 给一条能读懂的话，别让它炸成 TypeError 卡住整个面板。
+    var env = harnessEnv();
+    if (!env) {
+      done({ ok: false, error: "这块板要在 Harness 里打开才能问 AI（侧栏「项目看板」）。" });
+      return;
+    }
     var payload = {
-      board: HARNESS.id,
-      dir: HARNESS.dir,
-      label: HARNESS.label,
+      board: env.id,
+      dir: env.dir,
+      label: env.label,
       // skill 用独立前缀，避免和台账条目 id 撞车（条目是 OPS-030 这种）
       item: skillKey ? "skill:" + skillKey : itemId || "",
-      title: skillKey ? "Skill · " + skillKey : it ? it.title : "整本台账",
+      title: skillKey
+        ? "Skill · " + skillKey
+        : itemId === "__risks__"
+          ? "风险审核"
+          : it
+            ? it.title
+            : "整本台账",
       fresh: !!fresh,
-      question: harnessContext(itemId, actionText, skillKey),
+      askId: askId,
+      // 指定了旧会话就带着走；插件端优先用它，不再查映射表。
+      reuseSessionId: reuseSessionId || "",
+      // inline：这次回答要回到看板里显示，而不是跳去 Harness 会话窗。
+      inline: !!inline,
+      // 哪个窗口问的。回答广播回来时各窗口据此只收自己那份。
+      surface: SURFACE,
+      question: harnessContext(itemId, actionText, skillKey, withContext),
     };
 
+    // 投递路有三条，按「这一份页面被谁托管」分流：
+    //
+    //   ① Harness 面板的 iframe 里 —— POST /ops-board/ask，同源直达 + SSE 广播；
+    //   ② 系统浏览器窗口，地址是 Harness 的 http 源（…/ops-board/b/<id>/?chat=1）
+    //      —— 一样同源，①照走，只是没有父窗口可以 postMessage；
+    //   ③ 系统浏览器窗口，直接开在看板自己的端口上
+    //      —— /ops-board/ask 在那边不存在，只能走 /api/relay/req 让插件接住。
+    //
+    // 关键：①② 和 ③ 分不出来 —— inFrame() 对三者里的后两者都是 false，
+    // 而 ② 明明同源可用。所以不预判，先照旧打一次，没成才换中转（见下）。
     fetch("/ops-board/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -702,7 +2877,7 @@
       })
       .then(function (j) {
         if (j && j.ok) {
-          done({ ok: true });
+          done({ ok: true, askId: askId });
           return;
         }
         // 旧版 client 没有 SSE：退回 postMessage，至少能把问题送过去。
@@ -718,12 +2893,15 @@
                 item: payload.item,
                 title: payload.title,
                 fresh: payload.fresh,
+                askId: askId,
+                inline: payload.inline,
+                reuseSessionId: payload.reuseSessionId,
                 question: payload.question,
               },
               window.location.origin
             );
             target.focus();
-            done({ ok: true, fallback: true });
+            done({ ok: true, fallback: true, askId: askId });
             return;
           } catch (e) {}
         }
@@ -732,6 +2910,97 @@
       .catch(function (e) {
         done({ ok: false, error: String((e && e.message) || e) });
       });
+  }
+
+
+  // 工具名 → 看得懂的说法。
+  // 面板里要让人一眼看出「它在干什么」，而不是看一串 read / apply_patch。
+  //
+  // 键是真实出现过的名字：对着会话日志（session.v4.jsonl.zstd 里的 tool/call）
+  // 核过，实际用的是 read / grep / write / edit 这一套短名，不是 read_file。
+  // 长名一并留着，换个 provider 可能就叫法不同。
+  var TOOL_LABEL = {
+    read: "读文件",
+    read_file: "读文件",
+    read_image: "看图",
+    write: "写文件",
+    write_file: "写文件",
+    edit: "改文件",
+    edit_file: "改文件",
+    apply_patch: "改文件",
+    multi_edit: "改文件",
+    ls: "列目录",
+    list_dir: "列目录",
+    list_files: "列目录",
+    glob: "找文件",
+    grep: "搜索",
+    search_files: "搜索",
+    run: "跑命令",
+    run_command: "跑命令",
+    shell: "跑命令",
+    bash: "跑命令",
+    pwsh: "跑命令",
+    web_search: "联网搜",
+    web_fetch: "抓网页",
+    todo_write: "记待办",
+    task: "派子任务",
+  };
+
+  function toolLabel(name) {
+    return TOOL_LABEL[name] || name || "工具";
+  }
+
+  // 从工具参数里挑一个最能说明「动的是哪儿」的值。
+  // 不同工具的参数名不一样，按常见优先级找，找不到就退回工具名。
+  var ARG_KEYS = ["path", "file_path", "filePath", "pattern", "query", "command", "cmd", "url", "prompt"];
+
+  function toolDetail(args) {
+    if (!args) return "";
+    var obj = null;
+    try {
+      obj = typeof args === "string" ? JSON.parse(args) : args;
+    } catch (e) {
+      // 参数不一定是合法 JSON（截断 / 流式未完成），直接当文本看
+      return String(args).slice(0, 80);
+    }
+    if (!obj || typeof obj !== "object") return "";
+    for (var i = 0; i < ARG_KEYS.length; i += 1) {
+      var v = obj[ARG_KEYS[i]];
+      if (typeof v === "string" && v.trim()) {
+        var s = v.trim().replace(/\s+/g, " ");
+        return s.length > 80 ? s.slice(0, 79) + "…" : s;
+      }
+    }
+    return "";
+  }
+
+  // 把这一轮的工具调用画成一条可折叠的过程清单。
+  function renderSteps(steps) {
+    if (!steps || !steps.length) return null;
+    var box = document.createElement("div");
+    box.className = "msg-steps";
+    var head = document.createElement("div");
+    head.className = "msg-steps-head";
+    head.textContent = "过程 · " + steps.length + " 步";
+    box.appendChild(head);
+    for (var i = 0; i < steps.length; i += 1) {
+      var s = steps[i];
+      var row = document.createElement("div");
+      row.className = "msg-step" + (s.failed ? " is-failed" : "") + (s.settled ? "" : " is-pending");
+      var name = document.createElement("span");
+      name.className = "msg-step-name";
+      name.textContent = toolLabel(s.name);
+      row.appendChild(name);
+      var detail = toolDetail(s.args);
+      if (detail) {
+        var d = document.createElement("span");
+        d.className = "msg-step-detail";
+        d.textContent = detail;
+        row.appendChild(d);
+      }
+      box.appendChild(row);
+    }
+    return box;
   }
 
   function addMsg(role, text, extraClass) {
@@ -764,6 +3033,9 @@
     } else if (AI.skillScope) {
       // 整页 skill（顶上那个入口）：跨 skill 的全局动作
       list = HARNESS_SKILL_QUICK;
+    } else if (AI.riskScope) {
+      // 风险审核：动作只围绕风险车道，不给「更新台账」这类整本动作
+      list = HARNESS_RISK_QUICK;
     } else if (AI.ctx) {
       // 单条台账：这套动作归项目配置管（board.config.json 的 ask.itemQuick），
       // 因为「问这一条什么」因项目而异。
@@ -796,13 +3068,94 @@
 
   // 「新会话」= 下一条发送不复用旧会话，改在 Harness 里新开一个。
   // 会话本身存在 Harness 那边，这里不需要维护历史。
-  function resetChat(itemId) {
-    if (itemId !== undefined) AI.ctx = itemId || null;
-    // 哨兵 ctx 只用来把面板打开；重置后不能把它当条目 id 留着（D.items 里没有）
-    if (AI.ctx === "__skills__") AI.ctx = null;
-    msgsEl.innerHTML = "";
-    paintCtx();
+  // ── 对话记录持久化 ────────────────────────────────────────────────
+  //
+  // 为什么需要：跳去 Harness 会话窗看完整对话时，看板 iframe 会被卸载；回来时
+  // 页面重新加载，之前聊过的内容全在内存里（DOM 节点 + PENDING），一次都不剩。
+  // 所以按「作用域」把对话存进 localStorage，重开面板时原样恢复。
+  //
+  // 作用域口径必须和 sessionKey() 一致：条目 id / skill:<name> / __global__，
+  // 这样「点 OPS-029 问过的话」不会被灌到别的条目面板里。
+  var CHAT_KEY_PREFIX = "ops-board-chat:";
+  var CHAT_MAX = 40; // 单个作用域最多留 40 条，免得 localStorage 无限涨
 
+  function chatStoreKey() {
+    return CHAT_KEY_PREFIX + (harnessEnv() && harnessEnv().id ? harnessEnv().id + ":" : "") + scopeId();
+  }
+
+  // 「用户点了新对话」的标记，按作用域记。
+  //
+  // 为什么不能只清 DOM：面板一重载（去看 Harness 会话再回来就会重载），
+  // resetChat 又会去 Harness 把上一次的对话拉回来，看起来就是"清了个寂寞"。
+  // 所以清空时留一个标记：这个作用域下次开面板就是空的，直到用户真的发出新提问。
+  function clearedKey() {
+    return "ops-board-cleared:" + chatStoreKey().slice(CHAT_KEY_PREFIX.length);
+  }
+
+  function isClearedScope() {
+    try {
+      return window.localStorage.getItem(clearedKey()) === "1";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function markCleared(on) {
+    try {
+      if (on) window.localStorage.setItem(clearedKey(), "1");
+      else window.localStorage.removeItem(clearedKey());
+    } catch (e) {}
+  }
+
+  function readChatLog() {
+    try {
+      var raw = window.localStorage.getItem(chatStoreKey());
+      if (!raw) return [];
+      var list = JSON.parse(raw);
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function writeChatLog(list) {
+    try {
+      window.localStorage.setItem(chatStoreKey(), JSON.stringify(list.slice(-CHAT_MAX)));
+    } catch (e) {}
+  }
+
+  // 记一条进当前作用域的对话记录。steps 只留「名字 + 简述」，够回看过程用了。
+  function pushChatLog(entry) {
+    var list = readChatLog();
+    list.push(entry);
+    writeChatLog(list);
+  }
+
+  // 把一组 {role, text, steps} 摆进消息区。本地缓存和 Harness 历史共用这一段。
+  function paintHistory(rows, extraClass) {
+    for (var i = 0; i < rows.length; i += 1) {
+      var row = rows[i];
+      if (!row || !row.text) continue;
+      var isAi = row.role !== "user";
+      var b = addMsg(isAi ? "ai" : "user", row.text, isAi ? extraClass || "" : "");
+      // 过程清单也恢复，否则「答了什么」在、「做了什么」没了。
+      if (isAi && row.steps && row.steps.length) {
+        var stepsEl = renderSteps(row.steps);
+        var wrap = b && b.parentNode;
+        if (stepsEl && wrap) {
+          var details = document.createElement("details");
+          details.className = "msg-steps-wrap";
+          var summary = document.createElement("summary");
+          summary.textContent = "过程 · " + row.steps.length + " 步";
+          details.appendChild(summary);
+          details.appendChild(stepsEl);
+          wrap.appendChild(details);
+        }
+      }
+    }
+  }
+
+  function paintEmpty() {
     var it = AI.ctx ? D.items[AI.ctx] : null;
     var empty = document.createElement("div");
     empty.className = "ai-empty";
@@ -822,51 +3175,1185 @@
       empty.innerHTML =
         "<b>" + (it ? esc(it.title) : "整本台账") + "</b>" +
         (it
-          ? "选一个动作，或直接写你要它做的事；发送后会在 Harness 里打开这个条目的会话，同一会话继续追加。"
-          : "共 " + D.totalCount + " 条，" + D.openCount + " 条未收口。选一个动作或直接问；发送后会在 Harness 里打开「整本台账」会话。");
+          ? "选一个动作，或直接写你要它做的事；回答和过程都留在这个面板里。"
+          : "共 " + D.totalCount + " 条，" + D.openCount + " 条未收口。选一个动作或直接问；回答和过程都留在这个面板里。");
     }
     msgsEl.appendChild(empty);
-    setHint("");
   }
 
-  function openPanel(itemId) {
-    // 从台账条目进来时清掉 skill 作用域；skill 入口在 openSkillPanel 里设回来
+  // ── 从 Harness 拉这个作用域的既有对话 ──────────────────────────────
+  //
+  // Harness 会话是唯一权威来源：里面是真正发生过的事（包括在别处接着聊的内容）。
+  // 本机 localStorage 只是「上次看到的样子」，用来让面板先有东西显示、不至于白屏。
+  // 所以策略是：先用缓存铺上，再向 Harness 要一次真实历史，拿到了就整体替换。
+  function loadHistoryFromHarness(done, opts) {
+    if (!harnessEnv()) return done && done(false);
+    var key = scopeId();
+    var reqId = "hist-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
+    // 只让最新一次请求上屏（见 HISTORY_GEN 的注释）。
+    HISTORY_GEN += 1;
+    var gen = HISTORY_GEN;
+    HISTORY_WAIT[reqId] = function (payload) {
+      if (gen !== HISTORY_GEN) return done && done(false);
+      if (!payload || !payload.ok || !payload.messages || !payload.messages.length) {
+        // 静默失败最难查：这里留一条可看的日志，说明是「插件没回 / 回了空 / 插件报错」哪一种。
+        if (!payload) console.log("[ops-board] 历史请求无响应（插件未加载或版本过旧）");
+        else if (payload.error) console.log("[ops-board] 历史请求失败：" + payload.error);
+        else console.log("[ops-board] 该作用域在 Harness 里没有可回显的消息（entries=" + payload.entries + "）");
+        // 明确知道读的是哪条、但它没有可显示的消息时，记下来，
+        // 免得下一次认领又对同一条再拉一遍、再清一次屏。
+        if (payload && payload.sessionId) AI.shownId = String(payload.sessionId);
+        // 风险审核读到空（第一次用，或那条会话里只有工具调用）：这就是新对话，
+        // 下一句必须带背景，否则发出去的只是一句「审一下这些风险」。
+        if (AI.riskScope) AI.fresh = true;
+        return done && done(false);
+      }
+      // 只在面板还没聊开时替换，避免把用户刚问的话冲掉。
+      if (AI.busy || PENDING && Object.keys(PENDING).length) return done && done(false);
+      var empty = msgsEl.querySelector(".ai-empty");
+      if (empty) empty.remove();
+      // 已经有了本地恢复的内容就先清掉，用 Harness 的为准，不出现两套。
+      if (msgsEl.querySelector(".msg.is-restored")) {
+        Array.prototype.forEach.call(msgsEl.querySelectorAll(".msg.is-restored"), function (n) {
+          n.parentNode && n.parentNode.removeChild(n);
+        });
+      }
+      if (!msgsEl.querySelector(".msg")) paintEmpty();
+      paintHistory(payload.messages, "is-history");
+      // 把「屏幕上显示的是哪条会话」写回控件。
+      //
+      // 插件回包里带着它实际读的 sessionId。以前前端不看这个字段，于是
+      // 下拉可能指着 A、屏幕显示的是 B —— 用户以为接错了对话，其实是显示没对上。
+      // 这里统一以「真正读到的会话」为准，下拉跟着内容走。
+      if (payload.sessionId) {
+        AI.shownId = String(payload.sessionId);
+        syncPickedSession(String(payload.sessionId));
+      }
+      writeChatLog(
+        payload.messages.map(function (m) {
+          return { role: m.role === "user" ? "user" : "ai", text: m.text };
+        })
+      );
+      AI.fresh = false;
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+      done && done(true);
+    };
+    try {
+      postToHost({
+          type: "ops-board/history",
+          board: harnessEnv().id,
+          key: key,
+          reqId: reqId,
+          // 这里不需要 surface 判别：历史回包靠 reqId 认领（一次请求一个随机 id），
+          // 另一个窗口的 HISTORY_WAIT 里没有这个 id，收到也不理。
+          // 需要 surface 的是「回答」那条路 —— 回答是随会话推送下来的，
+          // 没有请求 id 可以认领，只能靠发问时带上的 surface 分辨。
+          // 指定就读那一条（「选择对话」选中的那个）；不带就按映射表取上次的。
+          sessionId: opts && opts.sessionId ? opts.sessionId : "",
+      });
+    } catch (e) {
+      delete HISTORY_WAIT[reqId];
+      return done && done(false);
+    }
+    // 插件不在（比如裸页打开）就别一直等。这个上限必须大于插件端等事件窗口的
+    // 时间（2.5s），否则插件还在轮询、这边已经超时放弃，等于白等 —— 之前就是这样。
+    setTimeout(function () {
+      if (HISTORY_WAIT[reqId]) {
+        delete HISTORY_WAIT[reqId];
+        done && done(false);
+      }
+    }, 6000);
+  }
+
+  function resetChat(itemId) {
+    if (itemId !== undefined) AI.ctx = itemId || null;
+    // 哨兵 ctx 只用来把面板打开；重置后不能把它当条目 id 留着（D.items 里没有）
+    if (AI.ctx === "__skills__" || AI.ctx === "__risks__") AI.ctx = null;
+    // 换了作用域，屏幕上就还没有任何会话的内容，别把上一条的记录带过来。
+    AI.shownId = "";
+    msgsEl.innerHTML = "";
+    paintCtx();
+
+    // 用户明确点过「新对话」的作用域：窗口就该是空的。
+    // 不能再去 Harness 把上一次的对话拉回来 —— 那正是"清了又回来"的原因。
+    if (isClearedScope()) {
+      AI.fresh = true;
+      paintEmpty();
+      return;
+    }
+
+    // 先用本地缓存铺上，面板不至于白屏；随后再向 Harness 要真实历史替换它。
+    var log = readChatLog();
+    // 记录回来了就不算「第一句」，后续提问只发原话；空作用域才要交代背景。
+    AI.fresh = log.length === 0;
+    if (log.length) {
+      paintHistory(log, "is-restored");
+      setHint("");
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    } else {
+      paintEmpty();
+    }
+    loadHistoryFromHarness();
+  }
+
+  // ── 会话选择控件 ──────────────────────────────────────────────────
+  //
+  // 面板上两个单选 + 一个下拉：新对话 / 选择对话（下拉里列出聊过的会话）。
+  // 之前只有一个「新会话」按钮，默认行为是复用，但复用失败时会静默新建，
+  // 用户看不出到底接进了哪个会话。现在把选择显式化：
+  //   · 单选决定 fresh
+  //   · 下拉列出该作用域下真正存在的旧会话，选中即复用
+  //   · 旧会话已失效时明确提示，不再静默新建
+
+  var modeNewEl = null;
+  var modeReuseEl = null;
+  var pickEl = null;
+
+  // 作用域标识：会话映射表、对话缓存、清空标记三处必须用同一个口径，
+  // 否则同一个作用域在三个地方算出三个 key，历史就各存各的。
+  function scopeId() {
+    if (AI.skill) return "skill:" + AI.skill;
+    // 风险审核要独立成一个作用域。它的 ctx 是空的，若不特判就会和
+    // 整本台账共用 "__global__"，两个入口的对话会串到一起。
+    if (AI.riskScope) return "__risks__";
+    return AI.ctx || "__global__";
+  }
+
+  function sessionKey() {
+    // 与插件端 boardKey/itemKey 的算法保持一致，否则查不到旧会话
+    return {
+      item: scopeId(),
+    };
+  }
+
+  function selectedMode() {
+    if (modeReuseEl && modeReuseEl.checked) return "reuse";
+    return "new";
+  }
+
+  function syncModeUi(opts) {
+    // 没有可继续的会话时，「选择对话」是空选项：直接退回「新对话」，
+    // 不能让单选停在「选择对话」上——那会让人以为接进了旧对话，实际却是新开。
+    if (modeReuseEl && modeReuseEl.checked && AI.sessions.length === 0 && modeNewEl) {
+      modeNewEl.checked = true;
+    }
+    var reuse = selectedMode() === "reuse";
+    if (pickEl) {
+      pickEl.disabled = reuse ? AI.sessions.length === 0 : true;
+      // 只有在「选择对话」模式下才把下拉露出来，否则那一行只剩个灰框没意义
+      pickEl.hidden = !reuse;
+    }
+    // 记住「接进哪条对话」。下拉还没铺开时（value 为空）别把已有的选择清掉：
+    // 那样一来一回 syncModeUi 就会把用户刚选的那条弄丢，发送时又变成新开会话。
+    if (reuse) {
+      if (pickEl && pickEl.value) AI.reuseId = pickEl.value;
+    } else {
+      AI.reuseId = "";
+    }
+    // 注意：这里不再改 AI.fresh。它只表示「这个作用域在本机上还没聊过」，
+    // 与「新对话 / 选择对话」是两个维度 —— 恢复出旧记录的会话也不该再灌背景。
+    if (reuse && AI.sessions.length === 0) {
+      setHint("还没有聊过的对话，这次会新开一个。");
+    }
+    // 真正切模式时才动消息区；openPanel/初始化时传 quiet，避免自己把刚铺好的记录抹掉。
+    if (!opts || !opts.quiet) showModeMessages(reuse);
+  }
+
+  // 切换「新对话 / 选择对话」时，把消息区换成对应的那一份。
+  //
+  // 这是本次要修的核心：以前切到「新对话」，消息区照旧显示着上一轮聊的内容，
+  // 看起来像「新对话还带着旧记录」。新对话就该是空的 —— 只清这个面板的显示，
+  // 不动 Harness 里的会话，也不删已经存下的记录（切回去还能看到）。
+  function showModeMessages(reuse) {
+    if (!msgsEl) return;
+    // 有提问在途时别抹屏，否则回答回来会找不到气泡
+    if (AI.busy || (PENDING && Object.keys(PENDING).length)) return;
+    msgsEl.innerHTML = "";
+    if (!reuse) {
+      // 新对话：清空当前窗口。缓存也要清，否则重载后又"复活"成旧内容；
+      // 再留个标记，避免重开面板时又从 Harness 把旧对话拉回来。
+      writeChatLog([]);
+      markCleared(true);
+      AI.fresh = true;
+      paintEmpty();
+      return;
+    }
+    // 选择对话：这次是"要看旧的"，把清空标记撤掉。
+    markCleared(false);
+    // 下拉里已经选定了某一条（默认就是最近那条）：直接按它取，
+    // 不要再走一遍「不指定 sessionId」的取法 —— 两条请求会各画一遍，屏幕上就出现两份。
+    if (pickEl && pickEl.value) {
+      loadChosenSessionHistory();
+      return;
+    }
+    // 没有可选的对话：先把本地缓存铺上，再从 Harness 要一次。
+    var log = readChatLog();
+    if (log.length) paintHistory(log, "is-restored");
+    else paintEmpty();
+    loadHistoryFromHarness();
+  }
+
+  // 用户在下拉里选了某一条对话：把窗口换成那一条的内容。
+  function loadChosenSessionHistory() {
+    if (!msgsEl) return;
+    var sid = (pickEl && pickEl.value) || "";
+    if (!sid) return;
+    AI.reuseId = sid;
+    if (AI.busy || (PENDING && Object.keys(PENDING).length)) return;
+    // 换对话时不能留着上一条的内容，否则两条对话会混在一屏里。
+    msgsEl.innerHTML = "";
+    paintEmpty();
+    setHint("正在读这条对话…");
+    loadHistoryFromHarness(function (ok) {
+      if (ok) {
+        setHint("接着这条对话聊，回答会留在看板里。");
+      } else {
+        setHint("这条对话里没有可显示的消息。", true);
+      }
+    }, { sessionId: sid });
+  }
+
+  // 拉取当前作用域可继续的旧会话。
+  //
+  // 两条来源，优先级不同：
+  //   1. 插件按工作区目录列出的 Harness 会话（真正完整的清单，下拉能选的就是这些）
+  //   2. /ops-board/sessions 映射表（只记「这个作用域上次用了哪条」，通常就一条）
+  //
+  // 以前只用第 2 条，于是「选择对话」里往往只有一项 —— 看着像选择，其实没得选。
+  // 现在先问插件要完整列表，拿不到（例如脱离 Harness 单独打开看板）再退回映射表。
+  function loadSessions(done) {
+    var key = sessionKey();
+    // 映射表虽然「只有一条」，但那一条正是**这个作用域上次用的会话** ——
+    // 对「从某个问题点进来」来说，它是比标题匹配更硬的证据。
+    // 所以两份都要：清单给选择范围，映射表给"哪条属于本条"。
+    fetch("/ops-board/sessions", { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("no route");
+        return r.json();
+      })
+      .then(function (map) {
+        var live = harnessEnv();
+        var board = (live && live.id) || "";
+        var perBoard = (map && map[board]) || {};
+        var rec = perBoard[key.item] || {};
+        return typeof rec === "object" && rec !== null ? rec.id : rec;
+      })
+      .catch(function () {
+        return "";
+      })
+      .then(function (ownSid) {
+        listHarnessSessions(function (items) {
+          if (items && items.length) {
+            applySessionList(items, done, ownSid);
+            return;
+          }
+          loadSessionsFromMap(key, done);
+        });
+      });
+  }
+
+  // 向插件要「这个看板目录下的 Harness 会话」。
+  //
+  // 走 postMessage 而不是 fetch：会话清单在 Harness 的客户端服务里，
+  // host 那边的路由看不到它。插件收到后按目录过滤，再用广播回给看板。
+  function listHarnessSessions(done) {
+    var live = harnessEnv();
+    if (!live || !live.dir) {
+      done(null);
+      return;
+    }
+    var reqId = "ls-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
+    var settled = false;
+    function finish(items) {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("message", onMessage);
+      done(items);
+    }
+    function onMessage(event) {
+      if (event.origin !== window.location.origin) return;
+      var data = event.data;
+      if (!data || data.type !== "ops-board/sessions-list") return;
+      if (String(data.reqId || "") !== reqId) return;
+      finish(Array.isArray(data.items) ? data.items : null);
+    }
+    window.addEventListener("message", onMessage);
+    try {
+      postToHost({
+          type: "ops-board/list-sessions",
+          reqId: reqId,
+          board: live.id || "",
+          dir: live.dir || "",
+      });
+    } catch (e) {
+      finish(null);
+      return;
+    }
+    // 脱离 Harness 时没人应答，别把面板卡在等状态上。
+    setTimeout(function () {
+      finish(null);
+    }, 3000);
+  }
+
+  // 把插件给的会话清单铺进下拉。清单已按目录过滤、按最近更新排序。
+  //
+  // 「默认选中哪条」是有讲究的：用户从某条问题点进来时，想看的是**这条问题**
+  // 的对话，不是「这个目录里最近谁聊过」。所以先按本条目作用域去认领会话，
+  // 认到了就选它；认不到才退回「最近更新的那条」。
+  function applySessionList(items, done, ownSid) {
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < items.length; i += 1) {
+      var it = items[i] || {};
+      var id = String(it.id || "");
+      if (!id || seen[id]) continue;
+      // 空会话没有任何内容，接进去也只是白屏，不列出来。
+      if (it.blank) continue;
+      seen[id] = true;
+      var label = it.title ? String(it.title) : "对话 · " + shortId(id);
+      out.push({
+        id: id,
+        label: label,
+        at: Number(it.at) || 0,
+        // 两级认领：映射表点名的优先（硬证据），其次看标题里的条目 id。
+        // 风险审核没有条目 id，它自己的会话标题是「风险审核 · …」，按这个认。
+        own: ownSid ? id === String(ownSid) : titleBelongsToItem(label, AI.riskScope ? "风险审核" : AI.ctx),
+      });
+    }
+    AI.sessions = out;
+    // 风险审核是「按车道聚合」的作用域，它的会话标题是「风险审核 · …」。
+    // 清单里其它会话（整本台账、各条台账）都不属于它，先收窄再认领 ——
+    // 否则会被"最近更新"那条抢走，把风险审核接进无关对话。
+    if (AI.riskScope) {
+      out = out.filter(function (o) {
+        return titleBelongsToItem(o.label, "风险审核");
+      });
+      AI.sessions = out;
+    }
+    // 先认领本条目自己的对话；认不到再退回最近那条。
+    var own = null;
+    for (var j = 0; j < out.length; j += 1) {
+      if (out[j].own) {
+        own = out[j];
+        break;
+      }
+    }
+    if (own) {
+      // 把它挪到最前面，下拉第一项就是「这个问题的对话」，看着也对得上。
+      out.splice(out.indexOf(own), 1);
+      out.unshift(own);
+    }
+    if (out.length && !isClearedScope() && modeReuseEl && modeNewEl) {
+      modeReuseEl.checked = true;
+      modeNewEl.checked = false;
+    }
+    fillPicker(true);
+    // 风险审核还没有自己的对话（第一次点「风险审核」就是这种情况）：
+    // 保持「新对话」，并且明确把 AI.fresh 置真 —— 下一次发送必须带上
+    // 风险条目原文。不置的话会沿用上一个作用域留下的 false，只发一句
+    // 「审一下这些风险」，agent 还得自己去翻台账。
+    if (AI.riskScope && !out.length) {
+      if (modeNewEl) modeNewEl.checked = true;
+      if (modeReuseEl) modeReuseEl.checked = false;
+      AI.reuseId = "";
+      AI.fresh = true;
+    }
+    // 认领到的那条要立刻置为选中：fillPicker 只会选第一项，
+    // 而第一项在上面已经换成了本条的对话，两者一致；这里再显式兜一次，
+    // 免得将来调换顺序时又悄悄退回「最近更新」。
+    if (own && pickEl) {
+      pickEl.value = own.id;
+      AI.reuseId = own.id;
+      // 用户明确点过「新对话」的作用域，窗口就该是空的 —— 认领到会话也不能
+      // 把内容拉回来，那正是"清了又回来"那种毛病。所以清空状态下只更新
+      // 下拉指向（下次手动切「选择对话」能直接看到这一条），不动单选、
+      // 不动消息区，也不发历史请求。
+      var cleared = isClearedScope();
+      if (cleared) {
+        if (modeNewEl) modeNewEl.checked = true;
+        if (modeReuseEl) modeReuseEl.checked = false;
+        pickEl.disabled = true;
+        setHint("");
+      } else if (AI.shownId !== own.id && !AI.busy && !(PENDING && Object.keys(PENDING).length)) {
+        setHint("正在读这条问题的对话…");
+        loadHistoryFromHarness(function (ok) {
+          if (ok) {
+            setHint("接着这条问题的对话聊，回答会留在看板里。");
+          } else {
+            // 标题认到了，但里面没有可显示的消息（例如只有工具调用）。
+            paintEmpty();
+            setHint("这条对话里没有可显示的消息。", true);
+          }
+        }, { sessionId: own.id });
+      } else if (AI.shownId === own.id) {
+        setHint("接着这条问题的对话聊，回答会留在看板里。");
+      }
+    }
+    if (done) done();
+  }
+
+  // 标题是否属于这个条目。
+  //
+  // 插件给会话起名时用的是「条目 id · 时间 · 标题」，中间以「 · 」分隔，
+  // 所以按「开头就是条目 id + 分隔符」判最稳，不能用 indexOf ——
+  // OPS-03 会在 OPS-030 里命中，把别人的对话认成自己的。
+  // （这里刻意不写模板占位符的字面量，成品校验会把它当作未解析的表达式。）
+  function titleBelongsToItem(title, itemId) {
+    var t = String(title || "");
+    var id = String(itemId || "");
+    if (!t || !id) return false;
+    if (t.indexOf(id) !== 0) return false;
+    var next = t.charAt(id.length);
+    return next === "" || next === " " || next === "·" || next === "-" || next === "_";
+  }
+
+  // 让控件跟上「屏幕上实际显示的是哪条会话」。
+  //
+  // 下拉里不一定有它（清单可能还没回来、或那条不在本目录）：那就补一个选项进去，
+  // 而不是让下拉空着 —— 空着会让下一次发送把 reuseSessionId 丢掉，退回新会话，
+  // 正是上一轮"选了却不接入"那种错。补进去也保证用户能看见自己在跟谁聊。
+  function syncPickedSession(sid) {
+    var id = String(sid || "");
+    if (!id || !pickEl) return;
+    var found = false;
+    for (var i = 0; i < pickEl.options.length; i++) {
+      if (pickEl.options[i].value === id) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      var row = null;
+      for (var k = 0; k < AI.sessions.length; k++) {
+        if (AI.sessions[k].id === id) {
+          row = AI.sessions[k];
+          break;
+        }
+      }
+      var label = row ? row.label : "对话 · " + shortId(id);
+      var opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = label;
+      // 插在最前面：它是"当前正在看的这条"，不是随便一条历史。
+      if (pickEl.options.length) pickEl.insertBefore(opt, pickEl.options[0]);
+      else pickEl.appendChild(opt);
+      AI.sessions.unshift({ id: id, label: label, at: 0 });
+    }
+    pickEl.value = id;
+    AI.reuseId = id;
+    pickEl.disabled = selectedMode() !== "reuse";
+    if (modeReuseEl) modeReuseEl.disabled = false;
+    // 有内容可接，就该停在「选择对话」上，别让单选还指着新对话。
+    if (!isClearedScope() && modeReuseEl && modeNewEl) {
+      modeReuseEl.checked = true;
+      modeNewEl.checked = false;
+      pickEl.disabled = false;
+    }
+  }
+
+  function loadSessionsFromMap(key, done) {
+    fetch("/ops-board/sessions", { cache: "no-store" })
+
+      .then(function (r) {
+        if (!r.ok) throw new Error("no route");
+        return r.json();
+      })
+      .then(function (map) {
+        // HARNESS 是脚本加载时抓的快照（那时可能是 null），
+        // 所以这里再读一次 window.__OPS_HARNESS__，谁后设都能拿到。
+        var live = harnessEnv();
+        var board = (live && live.id) || "";
+        var perBoard = (map && map[board]) || {};
+        var rec = perBoard[key.item] || {};
+        var sid = typeof rec === "object" && rec !== null ? rec.id : rec;
+        AI.sessions = buildSessionOptions(rec, sid);
+        // quiet：resetChat 刚把记录铺好，这里只同步控件状态，别再动消息区。
+        fillPicker(true);
+        // 有旧会话就默认接进上次那个，而不是无脑新开。
+        // 用户想换话题时仍可手动切回「新对话」，但那不应是每次点开的默认行为。
+        //
+        // 例外：用户刚点过「新对话」（此作用域带着清空标记），那就保持新对话。
+        // 否则一重开面板又被自动拨回「选择对话」，等于把清空动作撤销了。
+        if (sid && modeReuseEl && modeNewEl && !isClearedScope()) {
+          modeReuseEl.checked = true;
+          modeNewEl.checked = false;
+        }
+        syncModeUi({ quiet: true });
+        if (done) done();
+      })
+      .catch(function () {
+        // 脱离 Harness 时没有这个路由：当作「没有旧会话」，不是错误。
+        AI.sessions = [];
+        fillPicker(true);
+        if (done) done();
+      });
+  }
+
+  // 把映射表里一个作用域的记录整理成下拉选项。
+  //
+  // 以前只认 rec.id 一条，于是「选择对话」根本没得选。现在优先用 rec.history
+  // （宿主按最近顺序记着的会话列表）；老记录没有 history 就退回单条。
+  function buildSessionOptions(rec, sid) {
+    var obj = rec && typeof rec === "object" ? rec : null;
+    var rows = obj && Array.isArray(obj.history) ? obj.history : [];
+    var out = [];
+    var seen = {};
+    function push(id, title, at) {
+      var s = String(id || "");
+      if (!s || seen[s]) return;
+      seen[s] = true;
+      // 标题能看懂就用标题；只有 id 时给个短 id，别让所有行都叫「对话」。
+      var label = title ? title : "对话 · " + shortId(s);
+      out.push({ id: s, label: label, at: Number(at) || 0 });
+    }
+    // 最近用的那条排最前，这样默认选中就是「上次那个」
+    if (sid) push(sid, obj && obj.title, obj && obj.at);
+    for (var i = 0; i < rows.length; i += 1) {
+      var h = rows[i];
+      if (!h) continue;
+      push(h.id, h.title, h.at);
+    }
+    return out;
+  }
+
+  function shortId(id) {
+    var s = String(id || "");
+    return s.length > 10 ? s.slice(0, 6) + "…" + s.slice(-3) : s;
+  }
+
+  function fillPicker(quiet) {
+    if (!pickEl) return;
+    while (pickEl.firstChild) pickEl.removeChild(pickEl.firstChild);
+    if (AI.sessions.length === 0) {
+      var opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "（还没有聊过的对话）";
+      pickEl.appendChild(opt);
+      pickEl.disabled = true;
+      if (modeReuseEl) modeReuseEl.disabled = true;
+      // 没有旧会话就别让用户停在「选择对话」上，自动回到新对话
+      if (modeReuseEl && modeReuseEl.checked && modeNewEl) modeNewEl.checked = true;
+    } else {
+      for (var i = 0; i < AI.sessions.length; i++) {
+        var o = document.createElement("option");
+        o.value = AI.sessions[i].id;
+        o.textContent = AI.sessions[i].label;
+        pickEl.appendChild(o);
+      }
+      pickEl.disabled = selectedMode() !== "reuse";
+      if (modeReuseEl) modeReuseEl.disabled = false;
+    }
+    syncModeUi({ quiet: !!quiet });
+  }
+
+  function initSessionUi() {
+    modeNewEl = $("ai-mode-new");
+    modeReuseEl = $("ai-mode-reuse");
+    pickEl = $("ai-pick");
+    if (!modeNewEl || !modeReuseEl) return;
+    // 切「新对话」→ 清空当前窗口；切「选择对话」→ 换回对应的那份记录。
+    // 两种都由 syncModeUi → showModeMessages 统一处理，别在这里再补一次取历史，
+    // 否则一次切换会发两个请求、画两遍内容。
+    modeNewEl.addEventListener("change", function () {
+      syncModeUi();
+    });
+    modeReuseEl.addEventListener("change", function () {
+      syncModeUi();
+    });
+    if (pickEl) {
+      pickEl.addEventListener("change", function () {
+        // 换了一条对话：这时才需要单独取那一条（showModeMessages 只按当前选中项走）
+        AI.reuseId = pickEl.value;
+        loadChosenSessionHistory();
+      });
+    }
+  }
+
+  function openPanel(itemId, silentFocus) {
+    // 从台账条目进来时清掉 skill / 风险作用域；对应入口在下面各自设回来
     if (itemId !== "__skills__") {
       AI.skill = null;
       AI.skillScope = false;
     }
+    if (itemId !== "__risks__") AI.riskScope = false;
     AI.busy = false;
-    AI.fresh = false;
+    AI.reuseId = "";
     sendBtn.disabled = false;
     resetChat(itemId || null);
     inputEl.value = "";
     panel.classList.add("is-open");
     panel.classList.add("is-harness");
 
-    var newBtn = $("ai-new");
-    if (newBtn) {
-      newBtn.style.display = "";
-      newBtn.textContent = "新会话";
-      newBtn.title = "下一条发送新开一个 Harness 会话";
-    }
+    // 默认新会话；再按当前作用域看看有没有旧会话可继续
+    if (modeNewEl) modeNewEl.checked = true;
+    if (modeReuseEl) modeReuseEl.checked = false;
+    AI.sessions = [];
+    // quiet：resetChat 刚铺好记录，这里别让控件同步把消息区清掉
+    fillPicker(true);
+    loadSessions();
     inputEl.placeholder = "选一个动作，或直接写你要它做的事";
-    setHint("发送后在 Harness 会话里执行");
+    setHint("回答和过程都在这里显示");
     setTimeout(function () {
-      inputEl.focus();
+      // 自动恢复（页面重载）时不抢焦点：用户可能正在看别的，
+      // 光标被拽进输入框会打断滚动和选中。
+      if (!silentFocus) inputEl.focus();
     }, 260);
+    // 记住「开着」和「在跟谁聊」，重载回来照原样恢复。
+    // 只当对话框时不能记：那个 iframe 和主看板共用同一个键，它写一次就会把
+    // 主看板正在聊的作用域覆盖成空，关掉窗口回到看板就发现串台了。
+    if (!CHAT_ONLY) savePanelState(true);
   }
 
   // Skill 页专用的打开入口：skillName 为空表示"整页 skill"。
   // 用哨兵 ctx（__skills__）让 openPanel 照常走初始化流程；AI.skill / AI.skillScope
   // 记录真正的作用域，resetChat 会把哨兵清掉。
-  function openSkillPanel(skillName) {
+  function openSkillPanel(skillName, silentFocus) {
     AI.skill = skillName || null;
     AI.skillScope = true;
-    openPanel("__skills__");
+    AI.riskScope = false;
+    openPanel("__skills__", silentFocus);
+  }
+
+  // 总览页「待处理风险」右侧的入口：只审风险车道。
+  // 和「总结项目状态」的区别就在作用域 —— 那个是整本台账，这个是风险这一类，
+  // 两者各有自己的会话，不会互相串。
+  function openRiskPanel(silentFocus) {
+    AI.skill = null;
+    AI.skillScope = false;
+    AI.riskScope = true;
+    openPanel("__risks__", silentFocus);
   }
 
   function closePanel() {
+    // 只当对话框时，这一层没有「关掉」这个动作 —— 关窗是外面那个窗口的事。
+    if (CHAT_ONLY) {
+      // 独立浏览器窗：本页就是那个窗口，关它就是关窗。
+      // 注意只能关脚本自己开的窗（window.open 出来的），否则浏览器不理。
+      if (!inFrame()) {
+        try {
+          window.close();
+        } catch (e) {}
+        return;
+      }
+      // Harness 外壳层的窗口：本 iframe 随后会整个被卸载，告诉外面收起来。
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: "ops-board/chat-close" }, window.location.origin);
+        }
+      } catch (e) {}
+      return;
+    }
     panel.classList.remove("is-open");
+    savePanelState(false);
+  }
+
+  // ── 面板开关状态 ────────────────────────────────────────────────
+  //
+  // 去 Harness 会话窗看一眼再回来，看板 iframe 会被整体卸载重建，页面一重载
+  // 面板就是「关着」的样子 —— 明明刚才还在聊，回来却要重新点开。
+  // 所以把「开着没开、在跟谁聊」记在 localStorage，加载时照原样摆回来。
+  //
+  // 只记作用域标识，不记消息内容：内容是 chatLog 和 Harness 会话的事。
+  var PANEL_KEY = "ops-board-panel:";
+
+  function panelStoreKey() {
+    return PANEL_KEY + ((harnessEnv() && harnessEnv().id) || "default");
+  }
+
+  function savePanelState(open) {
+    try {
+      window.localStorage.setItem(
+        panelStoreKey(),
+        JSON.stringify({
+          open: !!open,
+          // 作用域：单条台账 / 单个 skill / 整页 skill / 风险审核 / 整本台账。
+          // 用 scopeId() 统一口径，否则风险审核会被记成""（=整本台账），
+          // 重载后从风险入口回来的面板会显示成整本台账。
+          scope: AI.skillScope ? (AI.skill ? "skill:" + AI.skill : "__skills__") : AI.riskScope ? "__risks__" : AI.ctx || "",
+        })
+      );
+    } catch (e) {}
+  }
+
+  function readPanelState() {
+    try {
+      var raw = window.localStorage.getItem(panelStoreKey());
+      if (!raw) return null;
+      var v = JSON.parse(raw);
+      return v && typeof v === "object" ? v : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // 页面加载后，如果上次是开着的，就把它重新打开、并回到同一个作用域。
+  function restorePanelState() {
+    var st = readPanelState();
+    if (!st || !st.open) return;
+    var scope = String(st.scope || "");
+    if (scope === "__risks__") {
+      openRiskPanel(true);
+    } else if (scope === "__skills__") {
+      openSkillPanel(null, true);
+    } else if (scope.indexOf("skill:") === 0) {
+      openSkillPanel(scope.slice(6), true);
+    } else if (scope && D.items && D.items[scope]) {
+      // 条目可能已经不在了（被关掉/改名），那就退回整本台账，别开一个空壳
+      openPanel(scope, true);
+    } else {
+      openPanel("", true);
+    }
+    // 打开动作会把各控件重置成默认值，这里补一句把状态写回「开着」
+    savePanelState(true);
+  }
+
+  // ── 浮窗化：拖位置、拉大小、钉在最上层、拉问答分界 ──────────────
+  //
+  // 以前这块是贴右边缘的整条抽屉：占满一屏高、盖掉半页台账，想边看条目边问
+  // 就只能来回关。现在做成一个正常的对话小窗 —— 标题栏拖着走，八个边角拉大小，
+  // 中间那条分界线上下拽，可以钉在最上层。
+  //
+  // 几何位置记在 localStorage，键名照样挂在 ops-board- 前缀下，
+  // 这样设置里那句「清空本机偏好」按前缀扫的时候不会漏掉它。
+  var WIN_KEY = "ops-board-win:";
+  var MIN_W = 320;
+  var MIN_H = 300;
+  var WIN_EDGE = 8; // 离视口边至少留这么多，别贴着屏幕边画
+
+  // mode: "float" 浮窗 / "dock" 贴右停靠（老样子）
+  // foot: 输入区高度（像素）。0 表示没收手拉过，按内容自适应。
+  var WIN = { mode: "float", pinned: false, x: 0, y: 0, w: 0, h: 0, foot: 0 };
+
+  var headEl = $("ai-head");
+  var bodyEl = $("ai-body");
+  var footEl = $("ai-foot");
+  var splitEl = $("ai-split");
+  var pinBtn = $("ai-pin");
+  var floatBtn = $("ai-float-toggle");
+  var detachBtn = $("ai-detach");
+
+  function winStoreKey() {
+    return WIN_KEY + ((harnessEnv() && harnessEnv().id) || "default");
+  }
+
+  function winDefault() {
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var w = Math.min(456, vw - 32);
+    var h = Math.min(640, vh - 120);
+    // 默认落在右下角：跟原来的位置一致，用户不用重新找它。
+    return {
+      mode: "float",
+      pinned: false,
+      x: Math.max(WIN_EDGE, vw - w - 26),
+      y: Math.max(WIN_EDGE, vh - h - 26),
+      w: w,
+      h: h,
+      foot: 0,
+    };
+  }
+
+  // 把几何值夹回视口内。
+  // 不夹的后果很实在：把窗口拖出屏幕再刷新，它就永远回不来了；
+  // 而且超出视口的 fixed 元素会让整页多出一条横向滚动条。
+  // 所以宁可让它「顶住」不动，也不许整块跑到屏幕外。
+  function winClamp(g) {
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var out = {};
+    out.w = Math.min(Math.max(g.w, MIN_W), Math.max(MIN_W, vw - WIN_EDGE * 2));
+    out.h = Math.min(Math.max(g.h, MIN_H), Math.max(MIN_H, vh - WIN_EDGE * 2));
+    var xHi = Math.max(WIN_EDGE, vw - WIN_EDGE - out.w);
+    var yHi = Math.max(WIN_EDGE, vh - WIN_EDGE - out.h);
+    out.x = Math.min(Math.max(g.x, WIN_EDGE), xHi);
+    out.y = Math.min(Math.max(g.y, WIN_EDGE), yHi);
+    return out;
+  }
+
+  // 分界线动的是「输入区多高」，消息区把剩下的吃掉。
+  // 上下都留底线：上面至少留 96px 能看见一条回答，下面至少 96px 能写字。
+  function applyFoot() {
+    if (!footEl || !bodyEl) return;
+    if (!WIN.foot) {
+      footEl.style.height = "";
+      footEl.removeAttribute("data-locked");
+      markSplitCap(false);
+      return;
+    }
+    var total = bodyEl.clientHeight;
+    if (!total) return;
+    // 只当对话框时没有「不拉过就自适应」这回事：那是整页浮窗的默认值。
+    // 这里要的是「把当前高度钉住」，所以上下限都按实际可用高度算，
+    // 不能沿用 96px 那条给浮窗留白用的底线 —— 窗口本来就小的时候，
+    // 96px 会让输入区反而被撑大。
+    if (CHAT_ONLY) {
+      var capTo = Math.max(60, total - 60 - (splitEl ? splitEl.offsetHeight : 0));
+      var want = Math.min(Math.max(WIN.foot, 60), capTo);
+      WIN.foot = Math.round(want);
+      footEl.style.height = WIN.foot + "px";
+      footEl.setAttribute("data-locked", "1");
+      markSplitCap(WIN.foot >= capTo - 1);
+      return;
+    }
+    var hi = Math.max(96, total - 96 - (splitEl ? splitEl.offsetHeight : 0));
+    var h = Math.min(Math.max(WIN.foot, 96), hi);
+    WIN.foot = Math.round(h);
+    // data-locked 让输入区不再被 flex 压缩：既然用户亲手定了高度，
+    // 就该按他定的来，压缩交给回答区（它本来就会滚）。
+    footEl.style.height = h + "px";
+    footEl.setAttribute("data-locked", "1");
+    markSplitCap(WIN.foot >= hi - 1);
+  }
+
+  // 拉到顶了就把手柄画灰：再往上拽不会有任何变化，不提示会以为坏了。
+  function markSplitCap(atTop) {
+    if (!splitEl) return;
+    if (atTop) splitEl.classList.add("is-capped");
+    else splitEl.classList.remove("is-capped");
+  }
+
+  function applyWin() {
+    if (!panel) return;
+    panel.setAttribute("data-mode", WIN.mode);
+    panel.setAttribute("data-pinned", WIN.pinned ? "1" : "0");
+    if (pinBtn) {
+      pinBtn.setAttribute("aria-pressed", WIN.pinned ? "true" : "false");
+      pinBtn.title = WIN.pinned ? "置顶中：盖在搜索和设置上面，点一下取消" : "置顶：盖在搜索和设置上面";
+    }
+    if (floatBtn) {
+      floatBtn.textContent = WIN.mode === "dock" ? "浮窗" : "停靠";
+      floatBtn.title =
+        WIN.mode === "dock" ? "切回可拖动的小浮窗" : "贴到右边缘，跟原来一样占满整条边";
+    }
+    if (WIN.mode === "dock") {
+      // 停靠形态全靠 CSS：内联几何留着会跟 top/bottom 打架，必须清掉。
+      panel.style.left = "";
+      panel.style.top = "";
+      panel.style.width = "";
+      panel.style.height = "";
+    } else {
+      var g = winClamp(WIN);
+      WIN.x = Math.round(g.x);
+      WIN.y = Math.round(g.y);
+      WIN.w = Math.round(g.w);
+      WIN.h = Math.round(g.h);
+      panel.style.left = WIN.x + "px";
+      panel.style.top = WIN.y + "px";
+      panel.style.width = WIN.w + "px";
+      panel.style.height = WIN.h + "px";
+    }
+    applyFoot();
+  }
+
+  function saveWin() {
+    try {
+      window.localStorage.setItem(winStoreKey(), JSON.stringify(WIN));
+    } catch (e) {}
+  }
+
+  function loadWin() {
+    var d = winDefault();
+    try {
+      var raw = window.localStorage.getItem(winStoreKey());
+      if (raw) {
+        var v = JSON.parse(raw);
+        if (v && typeof v === "object") {
+          if (v.mode === "dock" || v.mode === "float") d.mode = v.mode;
+          d.pinned = !!v.pinned;
+          if (typeof v.x === "number" && isFinite(v.x)) d.x = v.x;
+          if (typeof v.y === "number" && isFinite(v.y)) d.y = v.y;
+          if (typeof v.w === "number" && isFinite(v.w) && v.w > 0) d.w = v.w;
+          if (typeof v.h === "number" && isFinite(v.h) && v.h > 0) d.h = v.h;
+          if (typeof v.foot === "number" && isFinite(v.foot) && v.foot > 0) d.foot = v.foot;
+        }
+      }
+    } catch (e) {}
+    WIN = d;
+  }
+
+  // 一次拖拽的公共壳子：指针捕获 + 面板上那个 is-moving（禁选中、换光标）。
+  // 用 pointer 事件而不是 mouse：触屏和手写笔都能用，不用写两套。
+  function dragOnce(startEv, onMove, onDone) {
+    var moved = false;
+    var sx = startEv.clientX;
+    var sy = startEv.clientY;
+    var pid = startEv.pointerId;
+    function move(ev) {
+      if (ev.pointerId !== pid) return;
+      moved = true;
+      onMove(ev.clientX - sx, ev.clientY - sy, ev);
+    }
+    function up(ev) {
+      if (ev.pointerId !== pid) return;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      panel.classList.remove("is-moving");
+      if (splitEl) splitEl.classList.remove("is-moving");
+      if (onDone) onDone(moved);
+    }
+    startEv.preventDefault();
+    panel.classList.add("is-moving");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  // 问答区 / 输入区之间的那条分界。单独拎出来是因为「只当对话框」那种活法
+  // 也要它 —— 窗口大小归外面的 Harness 管，但「消息区多高、输入区多高」
+  // 仍然该由用户在这儿拉。两种活法的差别只在存不存：整页时记住高度，
+  // 只当对话框时不记（那个 iframe 关掉就卸载了，记了也没人读，还会跟
+  // 主看板抢同一个键）。
+  function initSplit() {
+    if (!splitEl) return;
+
+    splitEl.addEventListener("pointerdown", function (ev) {
+      if (ev.button !== 0) return;
+      var foot0 = footEl ? footEl.offsetHeight : 0;
+      splitEl.classList.add("is-moving");
+      dragOnce(
+        ev,
+        function (dx, dy) {
+          WIN.foot = foot0 - dy;
+          applyFoot();
+        },
+        function () {
+          if (!WIN.foot) applyFoot();
+          if (!CHAT_ONLY) saveWin();
+        }
+      );
+    });
+
+    // 键盘也能调：抓不住鼠标的时候（或者就想精确一点）用上下键。
+    splitEl.addEventListener("keydown", function (ev) {
+      var step = ev.shiftKey ? 40 : 12;
+      if (ev.key === "ArrowUp") {
+        WIN.foot = (WIN.foot || (footEl ? footEl.offsetHeight : 0)) + step;
+      } else if (ev.key === "ArrowDown") {
+        WIN.foot = (WIN.foot || (footEl ? footEl.offsetHeight : 0)) - step;
+      } else if (ev.key === "Enter" || ev.key === "Home") {
+        WIN.foot = 0;
+      } else {
+        return;
+      }
+      ev.preventDefault();
+      applyFoot();
+      if (!CHAT_ONLY) saveWin();
+    });
+
+    // 双击分界 = 收回自适应高度，跟大多数编辑器一个手感。
+    splitEl.addEventListener("dblclick", function () {
+      WIN.foot = 0;
+      applyFoot();
+      if (!CHAT_ONLY) saveWin();
+    });
+  }
+
+  function initFloat() {
+    if (!panel) return;
+    loadWin();
+
+    // 标题栏拖动。按钮和下拉自己要用点击，不能顺带把窗口拖走。
+    if (headEl) {
+      headEl.addEventListener("pointerdown", function (ev) {
+        if (WIN.mode !== "float") return;
+        if (ev.button !== 0) return;
+        var t = ev.target;
+        if (t && t.closest && t.closest("button,select,input,textarea,a")) return;
+        var x0 = WIN.x;
+        var y0 = WIN.y;
+        dragOnce(
+          ev,
+          function (dx, dy) {
+            WIN.x = x0 + dx;
+            WIN.y = y0 + dy;
+            var g = winClamp(WIN);
+            WIN.x = Math.round(g.x);
+            WIN.y = Math.round(g.y);
+            panel.style.left = WIN.x + "px";
+            panel.style.top = WIN.y + "px";
+          },
+          function () {
+            saveWin();
+          }
+        );
+      });
+    }
+
+    // 八条边/角拉大小。宽高都有底线，所以拉到最小时是「顶住」而不是翻转。
+    Array.prototype.forEach.call(panel.querySelectorAll(".ai-grip"), function (grip) {
+      grip.addEventListener("pointerdown", function (ev) {
+        if (WIN.mode !== "float") return;
+        if (ev.button !== 0) return;
+        var dir = grip.getAttribute("data-dir") || "";
+        var r = panel.getBoundingClientRect();
+        var left = r.left;
+        var top = r.top;
+        var right = r.left + r.width;
+        var bottom = r.top + r.height;
+        dragOnce(
+          ev,
+          function (dx, dy) {
+            var l = left;
+            var t = top;
+            var rt = right;
+            var bt = bottom;
+            if (dir.indexOf("e") > -1) rt = right + dx;
+            if (dir.indexOf("w") > -1) l = left + dx;
+            if (dir.indexOf("s") > -1) bt = bottom + dy;
+            if (dir.indexOf("n") > -1) t = top + dy;
+            var w = Math.max(MIN_W, rt - l);
+            var h = Math.max(MIN_H, bt - t);
+            // 从左边/上边拉的时候，对面那条边是不动的，位置要跟着回算，
+            // 否则窗口会一边变宽一边往右跑。
+            if (dir.indexOf("w") > -1) l = rt - w;
+            if (dir.indexOf("n") > -1) t = bt - h;
+            WIN.x = l;
+            WIN.y = t;
+            WIN.w = w;
+            WIN.h = h;
+            var g = winClamp(WIN);
+            WIN.x = Math.round(g.x);
+            WIN.y = Math.round(g.y);
+            WIN.w = Math.round(g.w);
+            WIN.h = Math.round(g.h);
+            panel.style.left = WIN.x + "px";
+            panel.style.top = WIN.y + "px";
+            panel.style.width = WIN.w + "px";
+            panel.style.height = WIN.h + "px";
+            applyFoot();
+          },
+          function () {
+            saveWin();
+          }
+        );
+      });
+    });
+
+    // 问答区 / 输入区之间的那条分界。
+    initSplit();
+
+    if (pinBtn) {
+      pinBtn.addEventListener("click", function () {
+        WIN.pinned = !WIN.pinned;
+        applyWin();
+        saveWin();
+      });
+    }
+
+    if (floatBtn) {
+      floatBtn.addEventListener("click", function () {
+        WIN.mode = WIN.mode === "dock" ? "float" : "dock";
+        applyWin();
+        saveWin();
+      });
+    }
+
+    // 「弹窗」：把这条对话拿到系统浏览器的一个独立窗口里。
+    if (detachBtn) detachBtn.addEventListener("click", function () { detachChat(); });
+
+    // 视口变小（切窗口、拉窄、投屏）时把窗口夹回来，
+    // 不然它会飘到看不见的地方，下次打开就跟丢了一样。
+    window.addEventListener("resize", function () {
+      if (WIN.mode !== "float") {
+        applyFoot();
+        return;
+      }
+      applyWin();
+      saveWin();
+    });
+
+    applyWin();
+  }
+
+  // 「弹窗」：把这条对话拿到一个真正独立的窗口里。
+  //
+  // 这里说的「独立」是字面意思 —— 一个系统浏览器窗口，Harness 的主窗口
+  // 最小化、被别的窗口盖住，它都还在那儿。之前两版都不算：
+  //   · 第一版在面板里画了个 position:fixed 的浮层，出不了 iframe 那个矩形；
+  //   · 第二版由插件画在 Harness 外壳层，看着像窗口，实际还是 Harness 窗口
+  //     里面的一个子区域，Harness 一关它就没了。
+  //
+  // 现在直接 window.open 一个 http 地址。在 Harness 里，Electron 的
+  // setWindowOpenHandler 会把 http 链接交给系统浏览器（deny + openExternal），
+  // 所以落地就是系统浏览器的一个新窗口。
+  //
+  // 关键在地址：本页在面板里时源是 dsh-app://app，那是 Electron 的私有协议，
+  // 浏览器打不开；必须换成 Harness 的 http 源（/ops-board/state 的 origin），
+  // 再拼上本页路径 —— 那条路径本来就是 Harness 的看板代理，能直接把这份页面
+  // 再托管一遍，顺带注入 __OPS_HARNESS__，独立窗才知道自己属于哪块板。
+  //
+  // 独立窗和插件不同源，问/答都走看板服务的中转（见上面的 relay*）。
+  function detachChat() {
+    // 没有 __OPS_HARNESS__ 说明这一份页面不是经 Harness 打开的（直接双击 html、
+    // 或者停在裸看板服务端口上）。那种页面本来就问不了 AI，弹出来只会是个
+    // 「要在 Harness 里打开」的空壳 —— 不如当场说清楚。
+    if (!harnessEnv()) {
+      setHint("这块板要在 Harness 里打开才能问 AI（侧栏「项目看板」），弹窗也是。", true);
+      return;
+    }
+    var scope = scopeId();
+    var path = location.pathname;
+    var url = "";
+    var query = "chat=1" + (scope ? "&scope=" + encodeURIComponent(scope) : "");
+
+    var launch = function (origin) {
+      if (!originUsable(origin)) {
+        // 拿不到 http 源 —— 退回到 Harness 外壳层那个窗口。
+        // 它不是真独立窗，但至少这条对话还能接着聊，不留一个点不动的按钮。
+        fallbackToShellWindow(scope);
+        return;
+      }
+      url = String(origin).replace(/\/+$/, "") + path + (path.indexOf("?") >= 0 ? "&" : "?") + query;
+      var opened = null;
+      try {
+        // 不加 noopener：Electron 的 setWindowOpenHandler 已经 deny + openExternal，
+        // 交出去的是系统浏览器里一个干净的新窗口，本来就没有 opener 关系。
+        opened = window.open(url, "_blank");
+      } catch (e) {
+        opened = null;
+      }
+      if (opened) {
+        try {
+          opened.opener = null;
+        } catch (e) {}
+        setHint("已经在系统浏览器的独立窗口里打开了。关掉它不影响看板，Harness 开着就能接着问。");
+        return;
+      }
+      // 在 Harness 里返回 null 是**正常**的：setWindowOpenHandler 的动作是 deny，
+      // 窗口被交给了系统浏览器。所以这里不报错，只把地址带上 —— 万一是被弹窗
+      // 拦了（例如这份页面已经不在 Harness 里），人还能照着它自己开。
+      setHint("已交给系统浏览器打开：" + url);
+    };
+
+    // 进页面时就开始问 origin，点的时候大概率已经在手里 —— window.open
+    // 必须落在点击的手势里，异步拿到的源会被当成弹窗拦掉。
+    if (HTTP_ORIGIN) launch(HTTP_ORIGIN);
+    else fetchHttpOrigin(launch);
+  }
+
+  // 兜底：老路 —— 让插件在 Harness 外壳层画一个窗口。
+  // 只有拿不到 http 源时才走这里。它不是真独立窗，别在别处也调它。
+  function fallbackToShellWindow(scope) {
+    var payload = {
+      type: "ops-board/chat-open",
+      board: (harnessEnv() && harnessEnv().id) || "",
+      // 插件拼上 ?chat=1 即可。只取 pathname：查询串里可能已经有调试参数。
+      proxy: location.pathname,
+      scope: scope,
+      skill: AI.skill || "",
+      skillScope: !!AI.skillScope,
+      riskScope: !!AI.riskScope,
+      ctx: AI.ctx || "",
+    };
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage(payload, window.location.origin);
+        setHint("已经在 Harness 的独立窗口里打开了，拖它、拉大小、置顶都可以。");
+        return;
+      }
+    } catch (e) {}
+    setHint("没能打开独立窗口：这块看板不是在 Harness 里打开的。", true);
   }
 
   function setHint(text, warn) {
@@ -876,17 +4363,45 @@
 
   // ── 发送 ──
 
+  // 以前这里按关键词猜「要不要跳去 Harness 会话窗」：
+  // 命中「动手 / 更新 / 解决一下」就跳，理由是「改动要让人看着」。
+  // 实际效果是点一下就跳走，面板里的对话当场断掉，这个窗口形同虚设。
+  //
+  // 现在一律留在面板里：回答 + 工具调用过程都回来，想看完整会话时
+  // 点每条回答下面的「去 Harness 看完整会话」。
+  // 函数留着是因为 harnessPost 的 inline 参数还在用（决定要不要等回答）。
+  function shouldInline() {
+    return true;
+  }
+
   function sendHarness(text) {
     if (!text) {
       setHint("先选一个动作，或写一句要问的。", true);
       return;
     }
+    var inline = shouldInline(text);
     AI.busy = true;
     sendBtn.disabled = true;
-    setHint("正在交给 Harness…");
-    var fresh = AI.fresh;
+    // 接进哪条对话：以 AI.reuseId 为准（它就是下拉选中项，openPanel/切模式时同步过），
+    // 只在它为空时退回读控件。判定「是否有可选对话」不能只看 pickEl.value ——
+    // 下拉在没铺开（还没拿到列表）时是空值，那会把用户的选择丢掉、变成新开会话。
+    var reuse = "";
+    if (selectedMode() === "reuse") {
+      reuse = AI.reuseId || (pickEl ? pickEl.value : "") || "";
+    }
+    setHint(reuse ? "正在接进上次的会话…" : "正在回答，过程也会显示在这里…");
+    var fresh = !reuse;
     var skillKey = AI.skill || null;
-    harnessPost(AI.ctx || null, text, fresh, function (result) {
+    // 只有会话第一句带背景（作用域/条目原文/回答规则）。后续提问只发原话——
+    // 会话本身已经记得上下文，重发一遍只会把真正的问题淹掉。
+    // AI.fresh 是「这个面板还没问过话」的标记：openPanel 置 true，首次发送成功置 false。
+    //
+    // 接进已有会话时一律不带背景：那条会话已经聊过，它自己就记得上下文；
+    // 再灌一遍等于把看板模板的背景插进别人正在进行的话题里，把真问题挤走。
+    var withContext = reuse ? false : AI.fresh;
+    // 作用域键用 scopeId()，不能传 AI.ctx —— 风险审核的 ctx 是空的，
+    // 传空会让插件端按 "__global__" 记账，和整本台账的会话串成一条。
+    harnessPost(AI.riskScope ? "__risks__" : AI.ctx || null, text, fresh, function (result) {
       AI.busy = false;
       sendBtn.disabled = false;
       if (!result.ok) {
@@ -894,16 +4409,21 @@
         return;
       }
       AI.fresh = false;
+      // 这个作用域已经重新开始聊了，「刚清空」的标记作废：
+      // 之后再开面板应该看到这次的新对话，而不是又回到空白。
+      markCleared(false);
       inputEl.value = "";
       var empty = msgsEl.querySelector(".ai-empty");
       if (empty) empty.remove();
       addMsg("user", text);
-      var what = skillKey ? "Skill「" + skillKey + "」" : "这个条目";
-      addMsg("ai", fresh
-        ? "已交给 Harness，正在新开一个会话；之后" + what + "的「问 AI」会继续用新会话。"
-        : "已交给 Harness，正在打开" + what + "的会话；之后在同一会话里继续追加。");
-      setHint(result.fallback ? "已交给 Harness 窗口。" : "已交给 Harness。");
-    }, skillKey);
+      // 立刻落库：哪怕回答还没回来、用户中途跳走，回来也还看得见自己问过什么。
+      pushChatLog({ role: "user", text: text });
+      // 一律 inline：挂一条「正在回答」，等回答回来时替换掉它。
+      // 挂在这里而不是 harnessPost 里，是因为要拿到气泡元素才能后续填充。
+      var body = addMsg("ai", "正在回答…", "is-pending");
+      if (result.askId) PENDING[result.askId] = body;
+      setHint(reuse ? "接进上次的会话，回答会留在看板里。" : "回答会留在看板里，过程也会显示出来。");
+    }, skillKey, inline, reuse, withContext);
   }
 
   // 只有一条发送路径：交给 Harness。
@@ -915,7 +4435,7 @@
       setHint("先选一个动作，或写一句要问的。", true);
       return;
     }
-    if (!HARNESS) {
+    if (!harnessEnv()) {
       // 裸页（没经过 Harness 注入）没有可以接收问题的地方。
       // 说清楚该从哪进，别让人对着按不动的按钮猜。
       setHint("这块板要在 Harness 里打开才能问 AI（侧栏「项目看板」）。", true);
@@ -930,7 +4450,7 @@
   // 所以先问一句面板在不在，不在就把「问 AI」按钮收掉，别留一个点了没反应的壳。
   if (!panel) {
     Array.prototype.forEach.call(
-      document.querySelectorAll("[data-ask], [data-ask-skill], [data-ask-skills], [data-ask-global]"),
+      document.querySelectorAll("[data-ask], [data-ask-skill], [data-ask-skills], [data-ask-global], [data-ask-risks]"),
       function (b) {
         b.parentNode && b.parentNode.removeChild(b);
       }
@@ -941,13 +4461,7 @@
 
   $("ai-send").addEventListener("click", send);
   $("ai-close").addEventListener("click", closePanel);
-  $("ai-new").addEventListener("click", function () {
-    AI.fresh = true;
-    resetChat();
-    inputEl.value = "";
-    setHint("下一条发送会新开一个 Harness 会话；旧会话保留在侧栏。");
-    inputEl.focus();
-  });
+  initSessionUi();
 
   inputEl.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -957,7 +4471,143 @@
   });
 
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && panel.classList.contains("is-open")) closePanel();
+    if (e.key !== "Escape") return;
+    if (finder && finder.classList.contains("is-open")) {
+      closeFinder();
+      return;
+    }
+    if (settingsEl && settingsEl.classList.contains("is-open")) {
+      closeSettings();
+      return;
+    }
+    if (panel.classList.contains("is-open")) closePanel();
+  });
+
+  // 接住插件回过来的历史。
+  window.addEventListener("message", function (event) {
+    if (event.origin !== window.location.origin) return;
+    var data = event.data;
+    if (!data || data.type !== "ops-board/history") return;
+    var waiter = HISTORY_WAIT[data.reqId];
+    if (!waiter) return;
+    delete HISTORY_WAIT[data.reqId];
+    waiter(data);
+  });
+
+  // 接住插件投回来的回答。
+  //
+  // 链路：看板 POST /ops-board/ask（带 inline + askId）→ 插件建/复用会话 →
+  // session.prompt → 插件轮询事件窗口读到这一轮的正文 →
+  // postMessage 回来看板的 iframe。
+  //
+  // 回答是异步的，可能这一轮还没回、人就点了别的动作，所以按 askId 找气泡，
+  // 找不到就说明那条气泡已经不在了（面板被重开过），直接丢弃，不报错。
+  window.addEventListener("message", function (event) {
+    // 同源校验：插件是父窗口，看板在 iframe 里，origin 一致。
+    if (event.origin !== window.location.origin) return;
+    var data = event.data;
+    if (!data || data.type !== "ops-board/answer") return;
+    // 只收自己那一份。回答是广播的（插件拿不到发问窗口的引用），所以
+    // 带上 surface 自报家门；没带的老版本插件按「整页」处理 —— 那时候
+    // 还只有整页这一种窗口，行为不变。
+    //
+    // 但 surface 要过 Host 的 /ops-board/ask 一道手，Host 是插件代码，
+    // 改完得重启应用才生效。旧版 Host 会把 surface 落成默认的 'page' 再发出去 ——
+    // 那是个「错误但非空」的值，光看字段就会被它骗过去：独立窗收不到回答，
+    // 整页那边反而多补一条气泡。
+    //
+    // 所以判定改成「askId 优先」：askId 中间那一位 c/p 是发问方自己写的，
+    // 不经过 Host 的任何判断，原样绕回来了。只有老看板发的 id 没有这一位，
+    // 那时再退回 surface 字段（也就退回「只有整页」那个年代的行为）。
+    var idTag = /^ask-([cp])-/.exec(String(data.askId || ""));
+    var src = idTag ? (idTag[1] === "c" ? "chat" : "page") : data.surface || "page";
+    if (src !== SURFACE) return;
+    var body = PENDING[data.askId];
+    // 气泡不在了（页面被重载过：跳去 Harness 再回来、或者面板被重开），
+    // 但回答是真实发生过的，不能就这样丢掉 —— 补一条新气泡把它显示出来，
+    // 下面照常落库，这样「关掉再回来」也不会丢东西。
+    if (!body) {
+      var emptyNow = msgsEl.querySelector(".ai-empty");
+      if (emptyNow) emptyNow.remove();
+      body = addMsg("ai", "正在回答…", "is-pending is-late");
+    } else {
+      delete PENDING[data.askId];
+    }
+    var wrap = body.parentNode;
+    if (wrap) wrap.className = wrap.className.replace(/\s*is-pending\b/, "");
+    // 复用旧会话时，这次回答会带上该会话的既有历史。把它渲染在面板顶部（正好
+    // 顶替掉 resetChat 留下的「当前还空着」的占位），让「选择对话」真的能
+    // 看见之前聊过什么，而不是一个空窗口。只在面板还是空占位时才插入，避免
+    // 对话框里已经聊开之后重复刷历史。
+    if (data.history && data.history.length) {
+      var empty = msgsEl.querySelector(".ai-empty");
+      if (empty) {
+        empty.remove();
+        var divider = document.createElement("div");
+        divider.className = "msg-divider";
+        divider.textContent = "── 上次对话 ──────────────";
+        msgsEl.insertBefore(divider, msgsEl.firstChild);
+        for (var hi = data.history.length - 1; hi >= 0; hi--) {
+          var hmsg = data.history[hi];
+          if (!hmsg || !hmsg.text) continue;
+          var hb = addMsg(hmsg.role === "user" ? "user" : "ai", hmsg.text, "is-history");
+          // addMsg 会 append 到末尾；要按顺序回插到最前面，需显式移动到开头。
+          if (hb && hb.parentNode) msgsEl.insertBefore(hb.parentNode, divider);
+        }
+      }
+    }
+    if (data.error) {
+      body.innerHTML = renderText("没拿到回答：" + data.error);
+      body.className = "msg-body msg-error";
+    } else {
+      var hasSteps = data.steps && data.steps.length;
+      if (data.text) {
+        body.innerHTML = renderText(data.text);
+        body.className = "msg-body";
+      } else if (hasSteps) {
+        // 只有动作、没有解释：别再说「去会话里看」，过程就在下面。
+        body.innerHTML = renderText("这一轮没有文字回答，做了下面这些事：");
+        body.className = "msg-body";
+      } else {
+        body.innerHTML = renderText("这一轮没有文字回答，也没看到动作。");
+        body.className = "msg-body";
+      }
+      // 过程清单挂在正文下面；折叠起来，想看的再点开。
+      var stepsEl = renderSteps(data.steps);
+      if (stepsEl && wrap) {
+        var details = document.createElement("details");
+        details.className = "msg-steps-wrap";
+        var summary = document.createElement("summary");
+        summary.textContent = "过程 · " + data.steps.length + " 步";
+        details.appendChild(summary);
+        details.appendChild(stepsEl);
+        wrap.appendChild(details);
+      }
+      // 想看完整会话（含思考、原始输出）时，给一个跳转入口。
+      if (wrap && data.sessionId) {
+        var link = document.createElement("button");
+        link.type = "button";
+        link.className = "msg-goto";
+        link.textContent = "去 Harness 看完整会话";
+        link.addEventListener("click", function () {
+          // 独立窗口里够不着插件（不同源），postToHost 会改走 HTTP 中转。
+          try {
+            postToHost({ type: "ops-board/open-session", sessionId: data.sessionId });
+          } catch (e) {}
+        });
+        wrap.appendChild(link);
+      }
+    }
+    // 把这一轮的回答也落库，这样跳去 Harness 看完整会话再回来，问答都还在。
+    // 只存文字和步骤摘要；「去 Harness」那个按钮是临时的，不存。
+    pushChatLog({
+      role: "ai",
+      text: data.error
+        ? "没拿到回答：" + data.error
+        : data.text || (data.steps && data.steps.length ? "这一轮没有文字回答，做了下面这些事：" : "这一轮没有文字回答，也没看到动作。"),
+      steps: data.steps || [],
+    });
+    msgsEl.scrollTop = msgsEl.scrollHeight;
   });
 
   // 总览页的入口：把整本台账交给 Harness（总结 + 更新）。
@@ -970,5 +4620,1154 @@
     });
   }
 
+  // 「待处理风险」右侧的入口：只审风险车道，和整本台账各用一条会话。
+  var riskAsk = document.querySelector("[data-ask-risks]");
+  if (riskAsk) {
+    riskAsk.textContent = "风险审核";
+    riskAsk.addEventListener("click", function (e) {
+      e.preventDefault();
+      openRiskPanel();
+    });
+  }
+
+  // ─────────────────────── 搜索 ───────────────────────
+
+  // 为什么自己写一层，不用浏览器自带的 Ctrl+F：
+  // 整本台账是一个文件里的 6 个视图，没激活的视图、收起来的卡片、AI 面板里的字
+  // 全都还在 DOM 里，自带查找会命中一堆当前根本看不到的东西，而且它只能滚到文字，
+  // 没法「按条目跳过去」。这层只搜条目本身，命中点按条目分组列出来。
+  var finder = $("finder");
+  var finderInput = $("finder-input");
+  var finderResults = $("finder-results");
+  var finderCount = $("finder-count");
+  var finderRows = [];
+  var finderCursor = -1;
+  var MAX_HIT = 5;
+
+  // sections 进到前端时已经是「【具体表现】…\n\n【影响】…」拼好的一整串，
+  // 所以按空行切块、按 【标签】 认位置，不去猜它的内部结构。
+  function splitBlocks(sections) {
+    var out = [];
+    if (!sections) return out;
+    String(sections)
+      .split(/\n{2,}/)
+      .forEach(function (chunk) {
+        var t = chunk.replace(/\s+$/, "");
+        if (!t) return;
+        var m = /^【([^】]{1,14})】\s*/.exec(t);
+        out.push({
+          where: m ? m[1] : "正文",
+          text: m ? t.slice(m[0].length) : t,
+        });
+      });
+    return out;
+  }
+
+  // evidence 是「- 提交：commit 0aa2787（10-30 09:24）」一行一条。
+  // 「- 提交：」里的「提交」正好是给人看的位置名，直接拿来用。
+  function evidenceLines(evidence) {
+    var out = [];
+    if (!evidence) return out;
+    String(evidence)
+      .split(/\n/)
+      .forEach(function (line) {
+        var t = line.replace(/^\s*-\s*/, "").replace(/\s+$/, "");
+        if (!t || t.indexOf("（这条没有留下证据线索）") === 0) return;
+        var m = /^([^：]{1,10})：([\s\S]*)$/.exec(t);
+        out.push({
+          where: m ? "证据·" + m[1] : "证据",
+          text: m ? m[2] : t,
+        });
+      });
+    return out;
+  }
+
+  function searchItems(q) {
+    var p = prefsNow();
+    var ql = q.toLowerCase();
+    var groups = [];
+    var total = 0;
+    Object.keys(D.items || {}).forEach(function (key) {
+      var item = D.items[key] || {};
+      var id = item.id || key;
+      var fields = [
+        { where: "编号", text: id },
+        { where: "标题", text: item.title || "" },
+      ];
+      if (p.scope !== "title") fields = fields.concat(splitBlocks(item.sections));
+      if (p.scope === "all") {
+        if (p.evidence) fields = fields.concat(evidenceLines(item.evidence));
+        if (item.area) fields.push({ where: "领域", text: item.area });
+        if (item.statusLabel) fields.push({ where: "状态", text: item.statusLabel });
+      }
+      var hits = [];
+      fields.forEach(function (f) {
+        var t = f.text || "";
+        if (!t) return;
+        if (t.toLowerCase().indexOf(ql) >= 0) hits.push({ where: f.where, text: t });
+      });
+      if (!hits.length) return;
+      total += hits.length;
+      groups.push({
+        id: id,
+        title: item.title || "",
+        lane: item.laneLabel || "",
+        hits: hits,
+      });
+    });
+    return { groups: groups, hits: total };
+  }
+
+  // 把一段文字里的命中词包成 <b>。用 indexOf 逐段切，不拼 HTML 字符串，
+  // 台账正文里有引号、尖括号，走 innerHTML 迟早点坑。
+  function markInto(el, text, q) {
+    if (!q) {
+      el.textContent = text;
+      return;
+    }
+    var low = text.toLowerCase();
+    var ql = q.toLowerCase();
+    var from = 0;
+    var i = low.indexOf(ql, from);
+    if (i < 0) {
+      el.textContent = text;
+      return;
+    }
+    while (i >= 0) {
+      if (i > from) el.appendChild(document.createTextNode(text.slice(from, i)));
+      var b = document.createElement("b");
+      b.textContent = text.slice(i, i + ql.length);
+      el.appendChild(b);
+      from = i + ql.length;
+      i = low.indexOf(ql, from);
+    }
+    if (from < text.length) el.appendChild(document.createTextNode(text.slice(from)));
+  }
+
+  // 命中那一行只留一截上下文，长了看不出命中在哪、短了没信息。
+  function snippet(text, q, before, after) {
+    var i = text.toLowerCase().indexOf(q.toLowerCase());
+    var body = text.replace(/\s+/g, " ");
+    if (i < 0) return body.slice(0, before + after);
+    var start = Math.max(0, i - before);
+    var end = Math.min(text.length, i + q.length + after);
+    var out = text.slice(start, end).replace(/\s+/g, " ");
+    if (start > 0) out = "…" + out;
+    if (end < text.length) out = out + "…";
+    return out;
+  }
+
+  function paintCursor() {
+    finderRows.forEach(function (b, i) {
+      b.classList.toggle("is-active", i === finderCursor);
+    });
+  }
+
+  function paintResults(q) {
+    if (!finderResults) return;
+    finderResults.textContent = "";
+    finderRows = [];
+    finderCursor = -1;
+    if (finderCount) finderCount.textContent = "";
+
+    var total = Object.keys(D.items || {}).length;
+    if (!q) {
+      var tip = document.createElement("p");
+      tip.className = "finder-empty";
+      tip.textContent = "这板现在有 " + total + " 条，输入关键词开始搜。";
+      finderResults.appendChild(tip);
+      return;
+    }
+
+    var found = searchItems(q);
+    // 标题那一条不单独列：分组头已经把标题连同高亮一起显示了，
+    // 再补一行「标题 …同一句话」只是把同一句话念两遍。
+    // 但计数还是要算上它 —— 分组头那行本身就是一处命中。
+    var shownHits = 0;
+    found.groups.forEach(function (g) {
+      var titleHit = false;
+      g.shown = g.hits.filter(function (h) {
+        if (h.where === "标题") {
+          titleHit = true;
+          return false;
+        }
+        return true;
+      });
+      shownHits += g.shown.length + (titleHit ? 1 : 0);
+    });
+    if (finderCount) {
+      finderCount.textContent =
+        found.groups.length + " 条 · " + shownHits + " 处命中";
+    }
+    if (!found.groups.length) {
+      var none = document.createElement("p");
+      none.className = "finder-empty";
+      none.textContent = "没搜到「" + q + "」。换个词，或者去设置里把搜索范围放宽到「全部字段」。";
+      finderResults.appendChild(none);
+      return;
+    }
+
+    found.groups.forEach(function (g) {
+      var group = document.createElement("div");
+      group.className = "finder-group";
+
+      var head = document.createElement("button");
+      head.type = "button";
+      head.className = "finder-item";
+      head.setAttribute("data-jump", g.id);
+      var idEl = document.createElement("span");
+      idEl.className = "finder-id";
+      markInto(idEl, g.id, q);
+      var titleEl = document.createElement("span");
+      titleEl.className = "finder-title";
+      markInto(titleEl, g.title, q);
+      head.appendChild(idEl);
+      head.appendChild(titleEl);
+      if (g.lane) {
+        var laneEl = document.createElement("span");
+        laneEl.className = "finder-lane";
+        laneEl.textContent = g.lane;
+        head.appendChild(laneEl);
+      }
+      group.appendChild(head);
+      finderRows.push(head);
+
+      g.shown.slice(0, MAX_HIT).forEach(function (h) {
+        var row = document.createElement("button");
+        row.type = "button";
+        row.className = "finder-hit";
+        row.setAttribute("data-jump", g.id);
+        var where = document.createElement("span");
+        where.className = "finder-where";
+        where.textContent = h.where;
+        var snip = document.createElement("span");
+        snip.className = "finder-snip";
+        markInto(snip, snippet(h.text, q, 24, 56), q);
+        row.appendChild(where);
+        row.appendChild(snip);
+        group.appendChild(row);
+        finderRows.push(row);
+      });
+
+      if (g.shown.length > MAX_HIT) {
+        var more = document.createElement("p");
+        more.className = "finder-more";
+        more.textContent = "还有 " + (g.shown.length - MAX_HIT) + " 处命中，点标题打开这条看全文。";
+        group.appendChild(more);
+      }
+
+      finderResults.appendChild(group);
+    });
+
+    finderCursor = 0;
+    paintCursor();
+  }
+
+  // 跳到某条：先切到它所在的视图，再滚过去。
+  // 和 route() 处理条目标题锚点走同一条路，收起来的卡片会被 scrollToEl 展开。
+  function goItem(id) {
+    if (!id) return;
+    var view = ITEM_VIEW[id] || viewOfId(id);
+    if (view) show(view);
+    try {
+      history.replaceState(null, "", "#" + id);
+    } catch (e) {}
+    saveRoute("#" + id);
+    nextFrame(function () {
+      scrollToEl(id);
+    });
+  }
+
+  function openFinder() {
+    if (!finder) return;
+    finder.classList.add("is-open");
+    paintResults(finderInput ? finderInput.value.trim() : "");
+    if (finderInput) {
+      finderInput.focus();
+      finderInput.select();
+    }
+  }
+
+  function closeFinder() {
+    if (!finder) return;
+    finder.classList.remove("is-open");
+    finderCursor = -1;
+    paintCursor();
+  }
+
+  function initFinder() {
+    if (!finder) return;
+    var openBtn = $("finder-open");
+    if (openBtn) {
+      openBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        openFinder();
+      });
+    }
+    var closeBtn = $("finder-close");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        closeFinder();
+      });
+    }
+    if (finderInput) {
+      // 每敲一个字就重算。台账最多几十条，重算比「防抖后再算」更好用：
+      // 敲完立刻看到结果变少，比等 200 毫秒更像在搜索。
+      finderInput.addEventListener("input", function () {
+        paintResults(finderInput.value.trim());
+      });
+      finderInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          var pick = finderRows[finderCursor >= 0 ? finderCursor : 0];
+          if (pick) {
+            var jump = pick.getAttribute("data-jump");
+            closeFinder();
+            goItem(jump);
+          }
+          return;
+        }
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          if (!finderRows.length) return;
+          e.preventDefault();
+          var step = e.key === "ArrowDown" ? 1 : -1;
+          finderCursor = (finderCursor + step + finderRows.length) % finderRows.length;
+          paintCursor();
+          var cur = finderRows[finderCursor];
+          if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: "nearest" });
+        }
+      });
+    }
+    if (finderResults) {
+      finderResults.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest("[data-jump]") : null;
+        if (!btn) return;
+        e.preventDefault();
+        var id = btn.getAttribute("data-jump");
+        closeFinder();
+        goItem(id);
+      });
+    }
+    // Ctrl+F / ⌘F：设置里可以关掉，关掉后浏览器自带的查找就回来了。
+    document.addEventListener("keydown", function (e) {
+      var isF = e.key === "f" || e.key === "F" || e.code === "KeyF";
+      if (!isF || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (!prefsNow().hotkey) return;
+      e.preventDefault();
+      openFinder();
+    });
+  }
+
+  // ─────────────────────── 设置 ───────────────────────
+
+  var settingsEl = $("settings");
+  var settingsNote = $("set-note");
+  var clearArmed = false;
+  var clearTimer = 0;
+
+  function say(msg) {
+    if (settingsNote) settingsNote.textContent = msg;
+  }
+
+  function paintSeg(id, value) {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#" + id + " button"),
+      function (b) {
+        b.classList.toggle("is-active", b.getAttribute("data-value") === String(value));
+      }
+    );
+  }
+
+  // 打开设置时一律按「当前真实状态」重画一遍，
+  // 不在打开时缓存：顶栏色块、[ 快捷键、别处的改动都能被如实反映。
+  function paintSettings() {
+    if (!settingsEl) return;
+    paintSeg("set-theme", document.documentElement.getAttribute("data-theme") || "night");
+    paintSeg("set-font", prefsNow().font);
+    paintSeg("set-rail", railHiddenNow() ? "1" : "0");
+    var view = $("set-view");
+    if (view) view.value = prefsNow().view || "";
+    var scope = $("set-scope");
+    if (scope) scope.value = prefsNow().scope;
+    var ev = $("set-evidence");
+    if (ev) ev.checked = !!prefsNow().evidence;
+    var hk = $("set-hotkey");
+    if (hk) hk.checked = !!prefsNow().hotkey;
+  }
+
+  function openSettings() {
+    if (!settingsEl) return;
+    settingsEl.classList.add("is-open");
+    clearArmed = false;
+    paintSettings();
+  }
+
+  function closeSettings() {
+    if (!settingsEl) return;
+    settingsEl.classList.remove("is-open");
+  }
+
+  function resetPrefs() {
+    prefs = {};
+    var k;
+    for (k in PREF_DEF) prefs[k] = PREF_DEF[k];
+    savePrefs();
+    applyFont(prefs.font);
+    applyTheme("night");
+    setRail(false);
+    paintSettings();
+    say("已恢复默认：主题夜晚、字号标准、侧栏展开、默认页跟着上次、搜索搜全部字段。");
+  }
+
+  // 「清空」要连主题、侧栏、上次落点、AI 对话一起清，这些键不只本插件用，
+  // 所以按前缀扫，而不是列一份迟早会漏的固定清单。
+  function clearPrefs() {
+    var i;
+    try {
+      var drop = [];
+      for (i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (!k) continue;
+        if (
+          k.indexOf("ops-board-") === 0 ||
+          k.indexOf("ops-mini-") === 0 ||
+          k.indexOf("ops-fold-") === 0
+        ) {
+          drop.push(k);
+        }
+      }
+      drop.forEach(function (n) {
+        localStorage.removeItem(n);
+      });
+    } catch (e) {}
+    // 内存里的偏好也一起回到出厂值，但界面要摆回默认态——
+    // 摆的过程本身会写键（主题、侧栏），所以先摆完，最后再扫一遍删干净。
+    prefs = null;
+    applyFont(prefsNow().font);
+    applyTheme("night");
+    setRail(false);
+    paintSettings();
+    try {
+      var again = [];
+      for (i = 0; i < localStorage.length; i++) {
+        var k2 = localStorage.key(i);
+        if (!k2) continue;
+        if (k2.indexOf("ops-board-") === 0 || k2.indexOf("ops-mini-") === 0) again.push(k2);
+      }
+      again.forEach(function (n) {
+        localStorage.removeItem(n);
+      });
+    } catch (e) {}
+    say("已清空本机偏好。台账本身不受影响；开着的 AI 对话与面板状态刷新一次就退场。");
+  }
+
+  function initSettings() {
+    if (!settingsEl) return;
+    var openBtn = $("settings-open");
+    if (openBtn) {
+      openBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        openSettings();
+      });
+    }
+    var closeBtn = $("settings-close");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        closeSettings();
+      });
+    }
+    // 点遮罩空白处关掉，点面板内部不关。
+    settingsEl.addEventListener("click", function (e) {
+      if (e.target === settingsEl) closeSettings();
+    });
+
+    var themeSeg = $("set-theme");
+    if (themeSeg) {
+      themeSeg.addEventListener("click", function (e) {
+        var b = e.target.closest("button[data-value]");
+        if (!b) return;
+        applyTheme(b.getAttribute("data-value"));
+        paintSettings();
+      });
+    }
+
+    var fontSeg = $("set-font");
+    if (fontSeg) {
+      fontSeg.addEventListener("click", function (e) {
+        var b = e.target.closest("button[data-value]");
+        if (!b) return;
+        prefsNow().font = Number(b.getAttribute("data-value"));
+        savePrefs();
+        applyFont(prefsNow().font);
+        paintSettings();
+      });
+    }
+
+    var railSeg = $("set-rail");
+    if (railSeg) {
+      railSeg.addEventListener("click", function (e) {
+        var b = e.target.closest("button[data-value]");
+        if (!b) return;
+        setRail(b.getAttribute("data-value") === "1");
+        paintSettings();
+      });
+    }
+
+    var viewSel = $("set-view");
+    if (viewSel) {
+      viewSel.addEventListener("change", function () {
+        prefsNow().view = viewSel.value || "";
+        savePrefs();
+        say(
+          viewSel.value
+            ? "下次没有停留记录时会打开这一页；有记录时仍然回上次的位置。"
+            : "已改回「跟着上次停留的位置」。"
+        );
+      });
+    }
+
+    var scopeSel = $("set-scope");
+    if (scopeSel) {
+      scopeSel.addEventListener("change", function () {
+        prefsNow().scope = scopeSel.value;
+        savePrefs();
+        if (finder && finder.classList.contains("is-open") && finderInput) {
+          paintResults(finderInput.value.trim());
+        }
+      });
+    }
+
+    var evBox = $("set-evidence");
+    if (evBox) {
+      evBox.addEventListener("change", function () {
+        prefsNow().evidence = !!evBox.checked;
+        savePrefs();
+        if (finder && finder.classList.contains("is-open") && finderInput) {
+          paintResults(finderInput.value.trim());
+        }
+      });
+    }
+
+    var hkBox = $("set-hotkey");
+    if (hkBox) {
+      hkBox.addEventListener("change", function () {
+        prefsNow().hotkey = !!hkBox.checked;
+        savePrefs();
+      });
+    }
+
+    var resetBtn = $("set-reset");
+    if (resetBtn) {
+      resetBtn.addEventListener("click", function () {
+        resetPrefs();
+      });
+    }
+
+    // 清空是不可逆的，误点代价是一个月攒下的对话，所以要点两次。
+    var clearBtn = $("set-clear");
+    if (clearBtn) {
+      clearBtn.addEventListener("click", function () {
+        if (!clearArmed) {
+          clearArmed = true;
+          clearBtn.textContent = "再点一次确认";
+          say("再点一次「确认」就清空了，这一步不能撤销。");
+          clearTimeout(clearTimer);
+          clearTimer = setTimeout(function () {
+            clearArmed = false;
+            clearBtn.textContent = "清空本机偏好";
+          }, 5000);
+          return;
+        }
+        clearArmed = false;
+        clearTimeout(clearTimer);
+        clearBtn.textContent = "清空本机偏好";
+        clearPrefs();
+      });
+    }
+  }
+
+  // ── 导出报表 ───────────────────────────────────────────────────
+  //
+  // 这件事的重点不是"把台账画一遍"，那看板本身就是。重点是生成一份
+  // 能脱离看板、发给别人的文件：领导要周报、群里要日报、月底要归档。
+  //
+  // 区间按每块板自己 ledger.updatedAt 往前推，不用今天 —— 看板是静态产物，
+  // 可能几天后才打开；按今天算会把真正该报的东西整段漏掉。
+  var expEl = $("exporter");
+  var expMode = "weekly";
+  var expMerged = "merged";
+  var expLoaded = false;
+  var expBoards = [];
+  var expBusy = false;
+
+  function expUrl(name) {
+    var env = harnessEnv();
+    if (env && env.id) return "/ops-board/b/" + env.id + "/api/report/" + name;
+    return "/api/report/" + name;
+  }
+
+  function openExport() {
+    if (!expEl) return;
+    expEl.classList.add("is-open");
+    if (!expLoaded) loadExportBoards();
+    paintExport();
+  }
+  function closeExport() {
+    if (expEl) expEl.classList.remove("is-open");
+  }
+
+  // 看板清单：注册表里有哪些板、各自最后更新、多少条。
+  function loadExportBoards() {
+    var box = $("exp-boards");
+    fetch(expUrl("boards"))
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (j) {
+        if (!j || !j.ok || !j.boards || !j.boards.length) {
+          if (box) box.innerHTML = '<p class="settings-note">没读到看板列表。可以先只导当前这块。</p>';
+          expBoards = [{ id: (harnessEnv() && harnessEnv().id) || '', label: D.project, current: true }];
+          expLoaded = true;
+          paintExport();
+          return;
+        }
+        expBoards = j.boards;
+        expLoaded = true;
+        paintExportBoards();
+        paintExport();
+      })
+      .catch(function () {
+        // 服务里没这个路由（比如用老版本 serve.mjs 托管）时，至少能导自己。
+        expBoards = [{ id: (harnessEnv() && harnessEnv().id) || '', label: D.project, current: true }];
+        expLoaded = true;
+        if (box) paintExportBoards();
+        paintExport();
+      });
+  }
+
+  function paintExportBoards() {
+    var box = $("exp-boards");
+    if (!box) return;
+    box.innerHTML = expBoards
+      .map(function (b) {
+        var on = b.current ? " checked" : "";
+        var meta = [];
+        if (b.updatedAt) meta.push("更新 " + String(b.updatedAt).slice(0, 10));
+        if (b.items) meta.push(b.items + " 条");
+        return (
+          '<label class="exp-board"><input type="checkbox" data-id="' +
+          escAttr(b.id) +
+          '"' +
+          on +
+          ' /><span class="t">' +
+          escHtml(b.label || b.id) +
+          (b.current ? '<span class="cur">当前</span>' : "") +
+          (meta.length ? "<i>" + escHtml(meta.join(" · ")) + "</i>" : "") +
+          "</span></label>"
+        );
+      })
+      .join("");
+  }
+
+  function escHtml(s) {
+    return String(s === null || s === undefined ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+  function escAttr(s) {
+    return escHtml(s).replace(/"/g, "&quot;");
+  }
+
+  function expPicked() {
+    var box = $("exp-boards");
+    if (!box) return [];
+    var out = [];
+    Array.prototype.forEach.call(box.querySelectorAll("input[data-id]"), function (i) {
+      if (i.checked) out.push(i.getAttribute("data-id"));
+    });
+    return out;
+  }
+
+  function expFormats() {
+    var out = [];
+    if ($("exp-f-md") && $("exp-f-md").checked) out.push("md");
+    if ($("exp-f-html") && $("exp-f-html").checked) out.push("html");
+    if ($("exp-f-txt") && $("exp-f-txt").checked) out.push("txt");
+    return out;
+  }
+
+  // 分段按钮的高亮 + 生成按钮的可点状态。
+  function paintExport() {
+    if (!expEl) return;
+    var modeSeg = $("exp-mode");
+    if (modeSeg) {
+      Array.prototype.forEach.call(modeSeg.querySelectorAll("button[data-value]"), function (b) {
+        b.classList.toggle("is-active", b.getAttribute("data-value") === expMode);
+      });
+    }
+    var mergeSeg = $("exp-merge");
+    if (mergeSeg) {
+      Array.prototype.forEach.call(mergeSeg.querySelectorAll("button[data-value]"), function (b) {
+        b.classList.toggle("is-active", b.getAttribute("data-value") === expMerged);
+      });
+    }
+    var go = $("exp-go");
+    if (go && !expBusy) {
+      go.disabled = !expPicked().length || !expFormats().length;
+    }
+  }
+
+  function expSay(msg, kind) {
+    var el = $("exp-status");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.className = "exp-status" + (kind ? " " + kind : "");
+  }
+
+  function fmtKB(n) {
+    return (n / 1024).toFixed(1) + " KB";
+  }
+
+  function doExport() {
+    if (expBusy) return;
+    var boards = expPicked();
+    var formats = expFormats();
+    if (!boards.length) {
+      expSay("先勾一块看板", "err");
+      return;
+    }
+    if (!formats.length) {
+      expSay("先勾一种格式", "err");
+      return;
+    }
+
+    expBusy = true;
+    var go = $("exp-go");
+    if (go) {
+      go.disabled = true;
+      go.textContent = "生成中…";
+    }
+    expSay("正在生成…");
+    var res = $("exp-result");
+    if (res) res.innerHTML = "";
+
+    var payload = {
+      mode: expMode,
+      boards: boards,
+      formats: formats,
+      split: expMerged === "split",
+    };
+    var outDir = $("exp-out") ? $("exp-out").value.trim() : "";
+    if (outDir) payload.out = outDir;
+
+    fetch(expUrl("export"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (j) {
+        expBusy = false;
+        if (go) {
+          go.disabled = false;
+          go.textContent = "生成报表";
+        }
+        if (!j || !j.ok) {
+          expSay("生成失败：" + ((j && j.error) || "未知错误"), "err");
+          return;
+        }
+        paintExport();
+        showExportResult(j.result);
+      })
+      .catch(function (e) {
+        expBusy = false;
+        if (go) {
+          go.disabled = false;
+          go.textContent = "生成报表";
+        }
+        expSay("生成失败：" + (e && e.message ? e.message : "网络或服务未响应"), "err");
+      });
+  }
+
+  function showExportResult(result) {
+    var box = $("exp-result");
+    if (!box) return;
+    if (!result || !result.files || !result.files.length) {
+      expSay("生成完了，但没有返回文件路径", "err");
+      return;
+    }
+    expSay("已生成 " + result.files.length + " 个文件", "ok");
+
+    var label = { md: "Markdown", html: "网页", txt: "纯文本" };
+    // 文件名里带模式前缀，从路径反推格式就够了，不用再传一份映射。
+    function kindOf(p) {
+      var m = /\.([a-z]+)$/.exec(String(p).toLowerCase());
+      return (m && label[m[1]]) || "文件";
+    }
+
+    var files = result.files
+      .map(function (f) {
+        return (
+          '<div class="exp-file"><span class="k">' +
+          kindOf(f) +
+          '</span><span class="p">' +
+          escHtml(f) +
+          "</span></div>"
+        );
+      })
+      .join("");
+
+    var sum = [];
+    sum.push("未收口 <b>" + result.open + "</b>");
+    if (result.moved) sum.push("本期记录 <b>" + result.moved + "</b>");
+    if (result.closed) sum.push("本期收口 <b>" + result.closed + "</b>");
+    if (result.stale) sum.push("压太久 <b>" + result.stale + "</b>");
+
+    box.innerHTML =
+      '<div class="exp-sum">' +
+      sum.join(" · ") +
+      "<br />文件已存到磁盘，路径如下（点路径可复制）：</div>" +
+      files;
+
+    // 点路径复制：导完一般就是要发出去，能直接粘比手抄路径有用。
+    Array.prototype.forEach.call(box.querySelectorAll(".exp-file .p"), function (p) {
+      p.style.cursor = "pointer";
+      p.title = "点击复制路径";
+      p.addEventListener("click", function () {
+        var t = p.textContent;
+        try {
+          navigator.clipboard.writeText(t).then(
+            function () {
+              expSay("路径已复制", "ok");
+            },
+            function () {
+              expSay("复制失败，请手动选中", "err");
+            }
+          );
+        } catch (e) {
+          expSay("复制失败，请手动选中", "err");
+        }
+      });
+    });
+  }
+
+  // ── 选保存位置 ────────────────────────────────────────────
+  //
+  // 走系统原生的「选择文件夹」对话框，由看板服务（跑在本机）弹出。
+  //
+  // 为什么不在网页里自己列目录：那不是"打开文件夹选择"，用户还得一层层点，
+  // 也看不到磁盘真实结构。浏览器侧的 <input webkitdirectory> 同样不行 ——
+  // 新版 Electron 不再暴露 File.path，webUtils 也没挂到 window 上，
+  // 选完拿不到绝对路径，等于选了个寂寞。
+
+  function pickFolder() {
+    var start = $("exp-out") ? $("exp-out").value.trim() : "";
+    expSay("正在打开文件夹选择窗口…");
+
+    fetch(expUrl2("fs/pick"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ start: start }),
+    })
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (j) {
+        if (!j || !j.ok) {
+          expSay((j && j.error) || "打不开文件夹选择窗口", "err");
+          return;
+        }
+        if (j.canceled) {
+          expSay("已取消");
+          return;
+        }
+        if ($("exp-out")) $("exp-out").value = j.path;
+        expSay("保存位置：" + j.path);
+      })
+      .catch(function (e) {
+        expSay("打不开文件夹选择窗口：" + String((e && e.message) || e), "err");
+      });
+  }
+
+  // ─────────────────────── 证据点开看 ───────────────────────
+  //
+  // 卡片下面「证据」里那些 `文件` / `提交`，原本只是纯文本：看到
+  // 「cloudfunctions/dailyUpdate/index.js 的 guard()」想确认它现在还在不在，
+  // 得自己开编辑器、cd 到项目、git show 那个 commit。
+  //
+  // 这里把它们做成点得开的：点文件 → 贴出那段代码（并定位到提到的函数）；
+  // 点提交 → 贴出那次改了什么。数据由看板服务现查，页面上不存副本。
+  //
+  // 三个刻意的取舍：
+  //   · 用右下角浮层而不是新窗口 —— 看完还要接着读卡片，跳走就回不来了。
+  //   · 不缓存结果 —— 代码随时会变，缓存等于给你看旧的。
+  //   · 查不到就说清楚为什么（文件没了 / commit 不在 / 目录不是 git 仓库），
+  //     不要只弹一句「失败」。
+
+  var lookEl = null;
+
+  function lookBox() {
+    if (lookEl) return lookEl;
+    lookEl = document.createElement("div");
+    lookEl.className = "look";
+    lookEl.setAttribute("role", "dialog");
+    lookEl.setAttribute("aria-modal", "false");
+    lookEl.setAttribute("aria-label", "证据内容");
+    lookEl.innerHTML =
+      '<div class="look-head"><b class="look-title"></b>' +
+      '<button class="look-x" type="button" aria-label="关闭">✕</button></div>' +
+      '<div class="look-sub"></div>' +
+      '<pre class="look-body"></pre>';
+    document.body.appendChild(lookEl);
+    lookEl.querySelector(".look-x").addEventListener("click", closeLook);
+    return lookEl;
+  }
+
+  function closeLook() {
+    if (lookEl) lookEl.classList.remove("on");
+  }
+
+  function lookOpen(title, sub) {
+    var el = lookBox();
+    el.querySelector(".look-title").textContent = title;
+    el.querySelector(".look-sub").textContent = sub || "";
+    el.querySelector(".look-body").textContent = "读取中…";
+    el.classList.add("on");
+    return el;
+  }
+
+  function lookFail(title, why) {
+    var el = lookBox();
+    el.querySelector(".look-title").textContent = title;
+    el.querySelector(".look-sub").textContent = "";
+    el.querySelector(".look-body").textContent = "✗ " + why;
+    el.classList.add("on");
+  }
+
+  function getJson(url, done) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url, true);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState !== 4) return;
+      var j = null;
+      try { j = JSON.parse(xhr.responseText); } catch (e) { j = null; }
+      done(j, xhr.status);
+    };
+    xhr.send();
+  }
+
+  function showFile(btn) {
+    var p = btn.getAttribute("data-path") || "";
+    var hint = btn.getAttribute("data-hint") || "";
+    if (!p) return;
+    btn.setAttribute("aria-busy", "1");
+    var url = expUrl2("evidence/file") + "?path=" + encodeURIComponent(p) + "&hint=" + encodeURIComponent(hint);
+    getJson(url, function (j) {
+      btn.removeAttribute("aria-busy");
+      if (!j) return lookFail(p, "看板服务没应答");
+      if (!j.ok) return lookFail(p, j.error || "读不到");
+      var sub;
+      if (j.line) {
+        sub = "第 " + j.line + " 行（" + (j.symbol || "?") + "）· 共 " + j.total + " 行 · 显示 " + j.from + "–" + j.to;
+      } else {
+        sub = "共 " + j.total + " 行 · 显示 " + j.from + "–" + j.to + (j.symbol ? " · 没找到 " + j.symbol : "");
+      }
+      var el = lookOpen(j.path, sub);
+      el.querySelector(".look-body").textContent = j.text;
+    });
+  }
+
+  function showCommit(btn) {
+    var h = btn.getAttribute("data-hash") || "";
+    if (!h) return;
+    btn.setAttribute("aria-busy", "1");
+    getJson(expUrl2("evidence/commit") + "?hash=" + encodeURIComponent(h), function (j) {
+      btn.removeAttribute("aria-busy");
+      if (!j) return lookFail(h, "看板服务没应答");
+      if (!j.ok) return lookFail(h, j.error || "查不到");
+      var when = j.at ? j.at.slice(0, 16).replace("T", " ") : "";
+      var stat = j.files.length + " 个文件 · +" + j.insertions + " −" + j.deletions;
+      var sub = (when ? when + " · " : "") + stat + (j.note ? " · " + j.note : "");
+      var el = lookOpen(j.hash + " " + j.subject, sub);
+      // 先给文件清单，再给 diff：清单一眼看清动了哪儿，diff 再细看。
+      var head = j.files.map(function (f) {
+        return "  " + String(f.add == null ? "?" : "+" + f.add).padStart(6) +
+          " " + String(f.del == null ? "?" : "−" + f.del).padStart(6) + "  " + f.path;
+      }).join("\n");
+      el.querySelector(".look-body").textContent = head + "\n\n" + j.diff;
+    });
+  }
+
+  function initLook() {
+    // 委托到 document：卡片会被整块重建（切视图、搜索），
+    // 逐个按钮绑事件会随重建不断泄漏。
+    document.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-look]");
+      if (!btn) return;
+      e.preventDefault();
+      var kind = btn.getAttribute("data-look");
+      if (kind === "file") showFile(btn);
+      else if (kind === "commit") showCommit(btn);
+    });
+    // 点浮层外面 / 按 Esc 关掉。
+    document.addEventListener("click", function (e) {
+      if (!lookEl || !lookEl.classList.contains("on")) return;
+      if (lookEl.contains(e.target)) return;
+      if (e.target.closest("[data-look]")) return; // 换一条接着看
+      closeLook();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeLook();
+    });
+  }
+
+  // 接口路径：看板在 8790 上是 /api/xxx；被插件代理时前面要带 /ops-board/b/<id>。
+  function expUrl2(name) {
+    var env = harnessEnv();
+    if (env && env.id) return "/ops-board/b/" + env.id + "/api/" + name;
+    return "/api/" + name;
+  }
+
+  function initPicker() {
+    var openBtn = $("exp-pick");
+    if (openBtn) {
+      openBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        pickFolder();
+      });
+    }
+    var resetBtn = $("exp-reset");
+    if (resetBtn) {
+      resetBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        if ($("exp-out")) $("exp-out").value = "";
+        expSay("已改回默认位置（看板目录下的 reports\\）");
+      });
+    }
+  }
+
+  function initExport() {
+    if (!expEl) return;
+    var openBtn = $("export-open");
+    if (openBtn) {
+      openBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        openExport();
+      });
+    }
+    var closeBtn = $("export-close");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        closeExport();
+      });
+    }
+    // 点遮罩空白处关掉，点面板内部不关。
+    expEl.addEventListener("click", function (e) {
+      if (e.target === expEl) closeExport();
+    });
+
+    var modeSeg = $("exp-mode");
+    if (modeSeg) {
+      modeSeg.addEventListener("click", function (e) {
+        var b = e.target.closest("button[data-value]");
+        if (!b) return;
+        expMode = b.getAttribute("data-value");
+        paintExport();
+      });
+    }
+
+    var mergeSeg = $("exp-merge");
+    if (mergeSeg) {
+      mergeSeg.addEventListener("click", function (e) {
+        var b = e.target.closest("button[data-value]");
+        if (!b) return;
+        expMerged = b.getAttribute("data-value");
+        paintExport();
+      });
+    }
+
+    var box = $("exp-boards");
+    if (box) {
+      box.addEventListener("change", function () {
+        paintExport();
+      });
+    }
+
+    ["exp-f-md", "exp-f-html", "exp-f-txt"].forEach(function (id) {
+      var el = $(id);
+      if (el) el.addEventListener("change", function () {
+        paintExport();
+      });
+    });
+
+    var go = $("exp-go");
+    if (go) {
+      go.addEventListener("click", function (e) {
+        e.preventDefault();
+        doExport();
+      });
+    }
+
+    initPicker();
+  }
+
+  // 只当对话框（?chat=1）：这个 iframe 除了对话框什么都不需要。
+  // 页面骨架的脚本一概不跑 —— 搜索/设置浮层、hash 路由、浮窗几何、
+  // 「上次开着就自动打开」全部跳过。跑起来只会有两种后果：
+  //   · 浮窗几何跟外面那层 Harness 窗口抢同一块面板（拖动时一格一格地跳）；
+  //   · savePanelState / saveWin 往 localStorage 写主看板正在用的键，
+  //     把主看板的作用域和位置覆盖掉，关掉窗口回去就串台了。
+  if (CHAT_ONLY) {
+    initSplit();
+    // 独立窗：和插件不同源，问/答全靠看板服务的中转。订阅要尽早挂上，
+    // 免得第一个回答回来时还没连好。
+    if (!inFrame()) startRelay();
+    // 接着聊同一条：scope 是看板点「弹窗」时带过来的作用域键。
+    // 认不出（空、或者那条台账已经不在了）就退回整本台账 —— 宁可开成
+    // 整本台账，也不要开一个指向不存在条目的空壳。
+    if (CHAT_SCOPE === "__risks__") {
+      openRiskPanel(true);
+    } else if (CHAT_SCOPE === "__skills__") {
+      openSkillPanel(null, true);
+    } else if (CHAT_SCOPE.indexOf("skill:") === 0) {
+      openSkillPanel(CHAT_SCOPE.slice(6), true);
+    } else if (CHAT_SCOPE && CHAT_SCOPE !== "__global__" && D.items && D.items[CHAT_SCOPE]) {
+      openPanel(CHAT_SCOPE, true);
+    } else {
+      openPanel("", true);
+    }
+    return;
+  }
+
+  initFinder();
+  initSettings();
+  initExport();
+  initFloat();
+  initLook();
+
+  // 「弹窗」要用的 http 源，进页面就先问一声。放着不点也没代价 ——
+  // 一次同源的 /ops-board/state，顺手还能发现 Harness 在不在线。
+  fetchHttpOrigin(function () {});
+
+  // 首次进页面：如果 URL 本来就带 hash（从浏览器直接打开某个锚点、或外部链接），
+  // 先把它记下来，免得下次重建时恢复成更早的旧落点。
+  saveRoute(location.hash);
   route();
+
+  // 最后一步：把上次开着面板的状态摆回来。
+  // 放在 route() 之后，是因为恢复要按作用域判断「这条台账还在不在」，
+  // 那依赖 D.items 已经就位。
+  restorePanelState();
+
+  // 【遗留·无宿主】原工作流页的领取状态同步：页面已于 2026-11-18 删除，
+  // [data-flow-node] 只有画布会渲染，所以 syncFlowState 现在必在首行早退（不发请求）。
+  // 调用保留只为不打断初始化序列；它确实是画布遗留，等一并清理。
+  // 必须在 restorePanelState() 之后 —— 它可能重建 DOM。
+  syncFlowState();
 })();

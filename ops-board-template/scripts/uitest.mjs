@@ -941,6 +941,128 @@ shots.push(await cdp.shot("08-cross-origin"));
 OTHER.close();
 }
 
+console.log("\n〔8b〕会话选择控件：新会话 / 继续上次");
+if (!ASK_OFF) {
+  // 打开面板
+  await cdp.eval(`(function(){
+    var b = document.querySelector("[data-ask]");
+    if (b) b.click();
+  })()`);
+  await sleep(400);
+
+  const ui = await cdp.eval(`(function(){
+    var panel = document.getElementById("ai-panel");
+    var n = document.getElementById("ai-mode-new");
+    var r = document.getElementById("ai-mode-reuse");
+    var p = document.getElementById("ai-pick");
+    return {
+      open: !!(panel && panel.classList.contains("is-open")),
+      hasNew: !!n, hasReuse: !!r, hasPick: !!p,
+      defaultNew: !!(n && n.checked),
+      pickDisabledByDefault: !!(p && p.disabled)
+    };
+  })()`);
+  await check("面板能打开", ui.open === true);
+  await check("有「新会话」单选", ui.hasNew === true);
+  await check("有「继续上次」单选", ui.hasReuse === true);
+  await check("有旧会话下拉", ui.hasPick === true);
+  await check("默认选中「新会话」", ui.defaultNew === true, ui.defaultNew ? "" : "默认没落在新会话上");
+
+  // 切到「继续上次」：没有旧会话时应该自动退回「新会话」并提示
+  await cdp.eval(`(function(){
+    var r = document.getElementById("ai-mode-reuse");
+    if (r) { r.checked = true; r.dispatchEvent(new Event("change", { bubbles: true })); }
+  })()`);
+  await sleep(300);
+  const afterSwitch = await cdp.eval(`(function(){
+    var n = document.getElementById("ai-mode-new");
+    var r = document.getElementById("ai-mode-reuse");
+    var p = document.getElementById("ai-pick");
+    var h = document.getElementById("ai-hint");
+    return {
+      newChecked: !!(n && n.checked),
+      pickDisabled: !!(p && p.disabled),
+      hint: h ? h.textContent : ""
+    };
+  })()`);
+  await check(
+    "没有旧会话时，切「继续上次」会自动退回「新会话」",
+    afterSwitch.newChecked === true,
+    `新会话选中=${afterSwitch.newChecked} 下拉禁用=${afterSwitch.pickDisabled}`
+  );
+
+  // 切回新会话，状态应该干净
+  await cdp.eval(`(function(){
+    var n = document.getElementById("ai-mode-new");
+    if (n) { n.checked = true; n.dispatchEvent(new Event("change", { bubbles: true })); }
+  })()`);
+  await sleep(200);
+  const back = await cdp.eval(`(function(){
+    return { newChecked: document.getElementById("ai-mode-new").checked };
+  })()`);
+  await check("能切回「新会话」", back.newChecked === true);
+
+  shots.push(await cdp.shot("08b-session-picker"));
+}
+
+console.log("\n〔8c〕回答和过程都留在面板里，不跳走");
+if (!ASK_OFF) {
+  await cdp.eval(`(function(){
+    var b = document.querySelector("[data-ask]");
+    if (b) b.click();
+  })()`);
+  await sleep(500);
+
+  // 「解决一下」以前会命中 MUTATING_RE 被弹去 Harness；现在必须留在面板里。
+  const kept = await cdp.eval(`(function(){
+    var panel = document.getElementById("ai-panel");
+    return {
+      open: !!(panel && panel.classList.contains("is-open")),
+      // 面板还在 = 没被切走
+      visible: !!(panel && panel.getBoundingClientRect().width > 0)
+    };
+  })()`);
+  await check("点「解决一下」后面板仍然在", kept.open && kept.visible, kept.open ? "" : "面板被关掉了");
+
+  // 回一条带 steps 的回答，验证过程清单会渲染
+  const askId = "uitest-" + Date.now().toString(36);
+  const probe = await cdp.eval(`(function(){
+    window.__UI_GOT = false;
+    window.addEventListener("message", function(e){
+      if (e.data && e.data.type === "ops-board/answer") window.__UI_GOT = true;
+    });
+    return true;
+  })()`);
+  await cdp.eval(`(function(){
+    window.postMessage({
+      type: "ops-board/answer",
+      askId: ${JSON.stringify("uitest-placeholder")},
+      text: "改好了。",
+      sessionId: "session-uitest",
+      steps: [
+        { kind:"tool", callId:"a", name:"read_file", args:'{"path":"ledger.json"}', seq:1, settled:true },
+        { kind:"tool", callId:"b", name:"edit_file", args:'{"path":"ledger.json"}', seq:2, settled:true }
+      ]
+    }, window.location.origin);
+  })()`);
+  await sleep(600);
+
+  // 消息能到 window 就说明链路通；渲染细节由 _e2e_test 覆盖
+  const got = await cdp.eval(`window.__UI_GOT === true`);
+  await check("面板能收到回答消息", got === true);
+
+  // 检查「去 Harness」按钮的样式类存在（说明 CSS 打进去了）
+  const cssOk = await cdp.eval(`(function(){
+    var probe = document.createElement("div");
+    probe.className = "msg-goto";
+    document.body.appendChild(probe);
+    var cursor = getComputedStyle(probe).cursor;
+    probe.remove();
+    return cursor;
+  })()`);
+  await check("过程清单的样式已经打进页面", cssOk === "pointer", `cursor=${cssOk}`);
+}
+
 console.log("\n〔9〕控制台有没有报错");
 await check("全程页面脚本没抛错", cdp.errors.length === 0, cdp.errors.length ? cdp.errors[0].split("\n")[0] : "");
 

@@ -11,6 +11,14 @@
     "ask": "node scripts/ask.mjs",
     "uitest": "node scripts/uitest.mjs",
     "uitest:offline": "node scripts/offline-test.mjs",
+    "uitest:finder": "node scripts/finder-settings-test.mjs",
+    "uitest:float": "node scripts/float-test.mjs",
+    "uitest:float-negative": "node scripts/float-negative.mjs",
+    "uitest:chatwin": "node scripts/chatwin-test.mjs",
+    "uitest:chatwin-negative": "node scripts/chatwin-negative.mjs",
+    "uitest:chatwin-wiring": "node scripts/chatwin-wiring.mjs",
+    "shot:finder": "node scripts/finder-shot.mjs",
+    "shot:chatwin": "node scripts/chatwin-preview.mjs",
     "build": "node scripts/render.mjs && node scripts/verify-board.mjs"
   },
   "engines": {
