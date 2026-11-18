@@ -14,7 +14,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { pathsIn } from "./evidence-path.mjs";
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024; // 超过 2MB 的文件不读，页面也放不下
@@ -184,14 +184,47 @@ export function lookAtCommit(projectDir, hash) {
 
   let diff = "";
   let note = "";
+  // 拿 diff 走两步：git 先把完整 patch 写进管道，我们再截断。
+  // 但 execFileSync 的 maxBuffer 是**硬上限**——超了它直接抛 ENOBUFS，
+  // 缓冲区里一个字节都拿不到（不是截断，是全丢）。所以这里不能只靠上面的
+  // MAX_DIFF 截断：一次删掉上万行的大提交，diff 动辄几 MB，会在 git 这一层
+  // 就失败，然后被下面 catch 成「diff 取不出来」，页面正文一片空白。
+  // 实测（某真实看板的一次大重构提交：51 文件 / +184 / −11081）就是这个症状。
+  //
+  // 对策：先按「够大但有限」的缓冲区取；真超了，再用 MAX_DIFF 兜住重取，
+  // 保证**总是有内容**（哪怕只有前 200KB），而不是有无之间跳变。
+  const DIFF_BUFFER = 8 * 1024 * 1024; // 8MB：足以容纳绝大多数提交的完整 patch
   try {
-    diff = git(["show", "--format=", "--patch", h]);
+    diff = git(["show", "--format=", "--patch", h], DIFF_BUFFER);
     if (diff.length > MAX_DIFF) {
       diff = diff.slice(0, MAX_DIFF);
       note = `diff 太长，只给了前 ${Math.round(MAX_DIFF / 1024)} KB`;
     }
   } catch (e) {
-    note = "diff 取不出来：" + String((e && e.message) || e);
+    const msg = String((e && e.message) || e);
+    const overflow = (e && e.code === "ENOBUFS") || /maxBuffer|ENOBUFS/i.test(msg);
+    if (overflow) {
+      // 8MB 都装不下：这次不用 execFileSync 攒，改成「边流边截」。
+      diff = "";
+      try {
+        const r = spawnSync(
+          "git",
+          ["show", "--format=", "--patch", h],
+          { cwd: projectDir, maxBuffer: DIFF_BUFFER, timeout: 60000 }
+        );
+        const buf = r && r.stdout ? r.stdout : Buffer.alloc(0);
+        if (buf.length) diff = buf.subarray(0, MAX_DIFF).toString("utf8");
+      } catch {
+        // 兜底也失败，留空并如实说明
+      }
+      const mb = DIFF_BUFFER / 1024 / 1024;
+      const mbText = mb >= 1 ? `${Math.round(mb)} MB` : `${Math.round(DIFF_BUFFER / 1024)} KB`;
+      note = diff
+        ? `diff 超过 ${mbText}，只给了前 ${Math.round(MAX_DIFF / 1024)} KB`
+        : `diff 超过 ${mbText}，取不出来`;
+    } else {
+      note = "diff 取不出来：" + msg;
+    }
   }
 
   const atMs = Number(atSec) * 1000;

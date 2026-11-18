@@ -19,7 +19,11 @@
     "uitest:chatwin-wiring": "node scripts/chatwin-wiring.mjs",
     "shot:finder": "node scripts/finder-shot.mjs",
     "shot:chatwin": "node scripts/chatwin-preview.mjs",
-    "build": "node scripts/render.mjs && node scripts/verify-board.mjs"
+    "build": "node scripts/gate.mjs --fast",
+    "gate": "node scripts/gate.mjs",
+    "gate:fast": "node scripts/gate.mjs --fast",
+    "test": "node scripts/gate.mjs --fast",
+    "test:all": "node scripts/gate.mjs"
   },
   "engines": {
     "node": ">=18"
