@@ -35,6 +35,7 @@ import {
   itemTable,
   stageBlock,
   stageBoard,
+  closedBoard,
   legend,
   historyList,
   openIndexLines,
@@ -288,10 +289,6 @@ function viewSkills(config, ledger) {
     <div class="kicker">Skill 统计 · ${esc(config.labels.skillsTitle || "Agent 用过的与产出的")}</div>
     <h1 class="details-title">Skill 台账</h1>
     <p class="rail-note">项目目录：${data && data.project ? `<code>${esc(data.project)}</code>` : "未登记"}${data && data.projectNames && data.projectNames.length ? ` · 别名：${esc(data.projectNames.join(" / "))}` : ""}${data && data.updatedAt ? ` · 统计于 ${relTime(data.updatedAt)}` : " · 还没有统计过"}</p>
-    <section class="issue-section">
-      <div class="section-head"><h2>问 AI</h2><span>先选动作，再点「发送」${askOff(config) ? "" : '<button class="btn btn-ask head-ask" type="button" data-ask-skills>问整页 Skill</button>'}</span></div>
-      <p class="stage-empty" style="border:0;padding:0">这一页的每条 skill 旁边也有「问 AI」；点哪条就围绕哪条问，点上面这个按钮则针对整页。</p>
-    </section>
     <div class="stage-board">
       <div class="stage-board-total"><span class="stage-board-num">${total}</span><span class="stage-board-label">共 ${total} 个 Skill</span></div>
       <div class="stage-board-table" style="grid-template-columns:repeat(3,1fr)">
@@ -300,6 +297,10 @@ function viewSkills(config, ledger) {
         <a class="stage-board-cell" href="#skill-group-related"><b>${related.length}</b><span>为它写的</span></a>
       </div>
     </div>
+    <section class="issue-section">
+      <div class="section-head"><h2>问 AI</h2><span>先选动作，再点「发送」${askOff(config) ? "" : '<button class="btn btn-ask head-ask" type="button" data-ask-skills>问整页 Skill</button>'}</span></div>
+      <p class="stage-empty" style="border:0;padding:0">这一页的每条 skill 旁边也有「问 AI」；点哪条就围绕哪条问，点上面这个按钮则针对整页。</p>
+    </section>
     <section class="skill-group" id="skill-group-used" data-skill-group="used">
       <h2>会话里用过的</h2>
       <p class="rail-note">Harness 会话日志里 <code>skill</code> 工具真的被调用的记录；只算工作目录属于这个项目（项目目录 / 看板目录）的会话。</p>
@@ -320,7 +321,7 @@ function viewSkills(config, ledger) {
 }
 
 // 「待处理问题」「待处理风险」这两块：整块内容原样搬到了各自的车道页
-// （问题修复 / 风险），当第一个模块、第一行 —— 总览不再重复铺一遍整表。
+// （问题修复 / 风险），紧跟在页首那块状态表后面 —— 总览不再重复铺一遍整表。
 // 所以这里提到模块级，两处共用同一份渲染，标题文案和作用域按钮都不变。
 //
 // headAsk 是这一块标题右侧的入口按钮：问题块给「总结项目状态」（整本台账作用域），
@@ -387,8 +388,8 @@ function viewOverview(config, ledger) {
 }
 
 // 车道页顶部那块「待处理」：只有问题和风险车道有。
-// 放在 stageBoard 之前 —— 用户要的是「第一行第一模块」，也就是进页面先看到
-// 还没收口的这摊事，再往下才是按阶段铺开的全量。
+// 放在 stageBoard 之后 —— 2026-11-19 用户定的是「各个页面的第一个模块都是状态表」：
+// 进页面先看全局数字，紧接着才是还没收口的这摊事，再往下是按阶段铺开的全量。
 function lanePendingBlock(config, ledger, lane) {
   if (lane.key === "bug") {
     return pendingSection(config, ledger, lane, "待处理问题", "当前没有需要解决的问题。", {
@@ -430,8 +431,8 @@ function viewLane(config, ledger, lane) {
   <div class="details-main">
     <div class="kicker">${esc(lane.label)}</div>
     <h1 class="details-title">按阶段推进</h1>
-    ${lanePendingBlock(config, ledger, lane)}
     ${stageBoard(lane, items)}
+    ${lanePendingBlock(config, ledger, lane)}
     ${blocks}
     ${legend(config, lane)}
     <div class="history" data-history-section>
@@ -444,7 +445,10 @@ function viewLane(config, ledger, lane) {
 
 // 「问题修复」只放还在推进的条目（未收口）；收口的都在这一页，跟原版一样：
 // 原版这一页是「已修复 / 已关闭 / 暂停」，两页的内容互不重叠。
-// 第一个模块「已解决」放需求的收口条目（原本在总览的「需求一览」，改名为「已解决」挪到这里）。
+// 页首那块合并状态板是第一模块（2026-11-19）：左「已收口 N」，右边把三个车道的
+// 已收口阶段排成一排（已解决 / 已上线 / 暂停 / 已解除 / 已知并接受），点一格只看那一组；
+// 某个状态在这一版台账里是 0，就只显示数字不给链接（分组按需渲染，指过去会是死链）。
+// 第二模块才是「已解决」—— 需求的收口条目（原本在总览的「需求一览」，挪到这里并改名）。
 function viewClosed(config, ledger) {
   const featureLane = laneByKey(config, "feature");
   const groups = config.lanes
@@ -486,6 +490,7 @@ function viewClosed(config, ledger) {
   <div class="details-main">
     <div class="kicker">已修复 / 已关闭 / 暂停</div>
     <h1 class="details-title">收口记录</h1>
+    ${closedBoard(config, ledger)}
     ${solved}
     ${groups}
     ${emptyState}

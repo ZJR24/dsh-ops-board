@@ -426,6 +426,36 @@ export function stageBoard(lane, items) {
 </div>`;
 }
 
+// 收口页顶部那块合并状态板：把每个车道的每个「已收口」阶段排成一格。
+// 和车道页的阶段板同一个组件、同一套样式，只是左侧大数换成「已收口」总数，
+// 右边跨车道铺开（已解决 / 已上线 / 暂停 / 已解除 / 已知并接受……随配置自动增减）。
+//
+// 格子只在那一格有数时才做成链接：收口页的分组是按需渲染的（某个车道没有收口条目
+// 就不出现），指过去就是死链 —— verify-board 第 7 条会报。
+// 同一车道的两个收口阶段指向同一个分组（需求页的「已上线」「暂停」都归「已解决」那组），
+// 所以点任一格筛出来的都是整组，不是单个状态。
+export function closedBoard(config, ledger) {
+  const cells = [];
+  let total = 0;
+  for (const lane of config.lanes) {
+    const items = itemsOfLane(ledger, lane.key).filter((i) => isClosedLaneItem(lane, i));
+    total += items.length;
+    for (const st of lane.stages.filter((s) => !s.open)) {
+      const n = items.filter((i) => st.statuses.includes(i.status)).length;
+      const body = `<b>${n}</b><span>${esc(st.label)}</span>`;
+      cells.push(
+        n
+          ? `<a class="stage-board-cell" href="#stage-${lane.key}-closed">${body}</a>`
+          : `<span class="stage-board-cell is-static">${body}</span>`
+      );
+    }
+  }
+  return `<div class="stage-board">
+  <div class="stage-board-total"><span class="stage-board-num">${total}</span><span class="stage-board-label">已收口</span></div>
+  <div class="stage-board-table" style="grid-template-columns:repeat(${cells.length},1fr)">${cells.join("")}</div>
+</div>`;
+}
+
 export function legend(config, lane) {
   const lanes = lane ? [lane] : config.lanes;
   const seen = new Map();

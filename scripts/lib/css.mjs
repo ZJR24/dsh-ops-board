@@ -241,6 +241,9 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .stage-board-cell b{font-family:var(--serif);font-size:23px;line-height:1.1;color:var(--red)}
 .stage-board-cell span{font-family:var(--sans);font-size:11px;font-weight:700;letter-spacing:.04em}
 .stage-board-cell small{font-family:var(--sans);font-size:9px;color:var(--muted);line-height:1.45}
+/* 数量为 0 的格子不是链接（收口页那块按需渲染分组，指过去会是死链），只是占位 */
+.stage-board-cell.is-static{cursor:default}
+.stage-board-cell.is-static b{color:var(--muted)}
 
 /* 表格 */
 .table-wrap{width:100%;overflow-x:auto;border:1px solid var(--rule2);box-shadow:0 2px 10px rgba(30,20,5,.05);margin-bottom:16px}
