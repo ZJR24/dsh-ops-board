@@ -139,7 +139,6 @@ await send("Page.addScriptToEvaluateOnNewDocument", {
 });
 
 const crashes = [];
-await send("Runtime.enable");
 ws.addEventListener("message", (e) => {
   const m = JSON.parse(e.data);
   if (m.method === "Runtime.exceptionThrown") crashes.push(JSON.stringify(m.params));
@@ -254,14 +253,26 @@ const placed = await ev(`(function(){
     if (!b) return null;
     var view = b.closest('.view');
     var main = b.closest('.details-main');
-    var first = main ? main.children[0] : null;
     var sec = b.closest('section');
     var h2 = sec ? sec.querySelector('h2') : null;
+    // 「第一行第一模块」的两层含义，都要成立：
+    //   ⓐ 它是这个页面里的第一个 section（前面不许有别的模块插队）
+    //   ⓑ 它在阶段数字条 .stage-board **之前**（数字条是 div 不是 section，
+    //      只查 section 的话把它挪到数字条后面也照样"第一个"，那就漏了）
+    var secs = main ? Array.prototype.slice.call(main.querySelectorAll('section')) : [];
+    var board = main ? main.querySelector('.stage-board') : null;
+    var beforeBoard = null;
+    if (board && sec) {
+      // DOCUMENT_POSITION_FOLLOWING = 4：board 在 sec 之后 → sec 在 board 之前
+      beforeBoard = !!(sec.compareDocumentPosition(board) & 4);
+    }
     return {
       view: view ? view.dataset.view : '',
-      isFirstChild: first === (sec ? (sec.parentNode === main ? sec : null) : null),
-      firstTag: first ? (first.id || first.className) : '',
-      secIsFirst: sec ? (sec === main.querySelector('section.issue-section')) : false,
+      isFirstSection: secs.length > 0 && secs[0] === sec,
+      beforeBoard: beforeBoard,
+      hasBoard: !!board,
+      secCount: secs.length,
+      firstId: secs.length ? (secs[0].id || secs[0].className) : '',
       h2: h2 ? h2.textContent.trim() : ''
     };
   }
@@ -271,13 +282,19 @@ ok(!!placed.bug, "「总结项目状态」还在页面上");
 if (placed.bug) {
   ok(placed.bug.view === "lane-bug", "它在问题修复页", placed.bug.view);
   ok(placed.bug.h2 === "待处理问题", "所属块是「待处理问题」", placed.bug.h2);
-  ok(placed.bug.secIsFirst === true, "是该页第一行第一模块", placed.bug.firstTag);
+  ok(placed.bug.isFirstSection === true, "是该页第一个模块",
+    `第 1 个 section = ${placed.bug.firstId}，全页 ${placed.bug.secCount} 个`);
+  ok(placed.bug.beforeBoard === true, "排在阶段数字条之前（第一行第一模块）",
+    placed.bug.hasBoard ? "数字条在其后" : "该页无数字条");
 }
 ok(!!placed.risk, "「风险审核」还在页面上");
 if (placed.risk) {
   ok(placed.risk.view === "lane-risk", "它在风险页", placed.risk.view);
   ok(placed.risk.h2 === "待处理风险", "所属块是「待处理风险」", placed.risk.h2);
-  ok(placed.risk.secIsFirst === true, "是该页第一行第一模块", placed.risk.firstTag);
+  ok(placed.risk.isFirstSection === true, "是该页第一个模块",
+    `第 1 个 section = ${placed.risk.firstId}，全页 ${placed.risk.secCount} 个`);
+  ok(placed.risk.beforeBoard === true, "排在阶段数字条之前（第一行第一模块）",
+    placed.risk.hasBoard ? "数字条在其后" : "该页无数字条");
 }
 
 // 工作台是单实例节点：切到没有挂载点的车道页时它被收进 #wb-park，
