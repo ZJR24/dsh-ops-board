@@ -87,6 +87,7 @@ const TEMPLATE_SCRIPTS = [
 // （教训：2026-11-18 手写清单漏了 evidence-path.mjs，产物交付即 ERR_MODULE_NOT_FOUND。）
 const TEMPLATE_LIBS_SEED = [
   "client.js", // 不是 import，是 render.mjs 读进来内联的，必须单独列
+  "planner.mjs", // 同上：render.mjs 读进来包成 IIFE 内联，不在 import 图里
   "css.mjs",
   "parts.mjs",
   "context.mjs",

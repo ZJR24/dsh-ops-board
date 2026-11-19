@@ -915,6 +915,7 @@
     steps: null,            // serve 分析的 serial/parallel 结果
     batteries: null,        // 看板手动分批：[{index, reason, cards:[{id,title,...}]}]
     order: [],              // 实际执行顺序：{id, title, prefix, why}
+    knownWindows: [],       // 上轮用过的对话窗口（{key,lastCard,lastAt}），作为分析窗口的复用线索
     run: false,             // 是否正在跑
     stop: false,            // 用户点了停止
     mode: "serial",         // serial | parallel
@@ -1163,7 +1164,235 @@
     if (sz) sz.setAttribute("data-count", WB.dragPool.length);
   }
 
-  // 分析：调 serve 纯计算，给出串/并行建议，铺进下方步骤区供确认。
+    // 并行时统一走这里：判定 lanes（整批全交 / 分析窗口 / 回退），然后铺出去。
+  // 分批与不分批共用同一套判断，避免两条路径两套逻辑。
+  function workbenchPlanAndRender(runEl, stepsEl) {
+    // 「整批全交」按定义就是一个窗口装全部，不问分析窗口、也不按区域拆。
+    if (WB.batchMode) {
+      WB.lanes = [{ key: "整批全交", prefix: "整批全交", cards: WB.order.slice(), why: "全部卡交给同一个窗口" }];
+      workbenchRenderLanes(runEl, stepsEl, WB.lanes, null);
+      workbenchFinishAnalyze(true);
+      return;
+    }
+
+    var reusePlanner = wbPlannerReuseOn();
+    var selCards = WB.order.map(function (o) {
+      var cand = (WB.candidate || []).filter(function (c) { return c.id === o.id; })[0] || {};
+      return {
+        id: o.id, title: o.title, prefix: o.prefix || cand.prefix || "",
+        lane: cand.lane || "", status: cand.status || "", step: cand.step || "",
+      };
+    });
+
+    var prefixOf = {};
+    selCards.forEach(function (c) { prefixOf[c.id] = c.prefix || ""; });
+    var orderIds = WB.order.map(function (o) { return o.id; });
+
+    // 回退用：按区域前缀分组（与服务端一致的确定性规则）。
+    function fallback() {
+      var P = wbPlanner();
+      if (P) {
+        return P.fallbackLanes(orderIds, {
+          get: function (k) { return prefixOf[k] || ""; },
+          has: function (k) { return Object.prototype.hasOwnProperty.call(prefixOf, k); },
+        }).map(function (la) {
+          return {
+            key: la.key, prefix: la.prefix, why: la.why,
+            cards: la.cardIds.map(function (id) {
+              return WB.order.filter(function (o) { return o.id === id; })[0];
+            }).filter(Boolean),
+          };
+        }).filter(function (la) { return la.cards.length; });
+      }
+      // 连校验器都没有：退到最朴素的分组
+      var byPrefix = {}, lanes = [];
+      WB.order.forEach(function (o) {
+        var p = o.prefix || "(未分区域)";
+        if (!byPrefix[p]) { byPrefix[p] = []; lanes.push({ key: p, prefix: p, cards: byPrefix[p] }); }
+        byPrefix[p].push(o);
+      });
+      return lanes;
+    }
+
+    function apply(lanes, decided) {
+      WB.lanes = lanes;
+      workbenchRememberLanes(lanes);
+      workbenchRenderLanes(runEl, stepsEl, lanes, decided);
+      workbenchFinishAnalyze(true);
+    }
+
+    // 先把确定性分组**立刻**铺出来，再异步问分析窗口。
+    // 为什么不等它：分析窗口是一次真实的 LLM 往返，可能几十秒；让用户盯着空面板等
+    // 是完全没必要的——按区域分组本来就是合法的保底答案。
+    // 所以顺序是「先给能用的，再换成更好的」：AI 计划回来了且合法就重铺，不合法就保持现状。
+    apply(fallback(), {
+      source: "pending",
+      reason: wbPlanAskEnabled()
+        ? "先按区域分组铺出来，正在请分析窗口复核…"
+        : "当前页面没有可用的对话窗口（不在 Harness 面板里），已按区域分组。",
+    });
+    if (!wbPlanAskEnabled()) return;
+
+    wbSetAnalyzeBusy(true);
+    var askSeq = (WB.planSeq = (WB.planSeq || 0) + 1);
+    wbAskPlanner(selCards, WB.batchSize || 1, reusePlanner, function (text, err) {
+      wbSetAnalyzeBusy(false);
+      // 期间用户又点了一次分析 / 已经开跑：这一轮的结果作废，别把面板改回去。
+      if (askSeq !== WB.planSeq || WB.run) return;
+      var decided = err
+        ? { lanes: null, source: "fallback", reason: "分析窗口没答上来：" + err }
+        : wbResolvePlan(text, orderIds, prefixOf);
+      if (decided.source === "ai" && decided.lanes && decided.lanes.length) {
+        var lanes = decided.lanes.map(function (la) {
+          return {
+            key: la.key, prefix: la.prefix, why: la.why || "",
+            cards: la.cardIds.map(function (id) {
+              return WB.order.filter(function (o) { return o.id === id; })[0];
+            }).filter(Boolean),
+          };
+        }).filter(function (la) { return la.cards.length; });
+        if (lanes.length) {
+          workbenchLog("分析窗口已复核：" + lanes.length + " 个窗口。");
+          apply(lanes, decided);
+          return;
+        }
+        decided = { lanes: null, source: "fallback", reason: "计划映射回卡失败了" };
+      }
+      // 回退：确定性分组已经在面板上了，只需要把原因说清楚（不重铺，避免闪一下）。
+      workbenchRenderLanes(runEl, stepsEl, WB.lanes, decided);
+      workbenchLog("分析窗口的计划没采用（" + (decided.reason || "不合法") + "），保持按区域分组。");
+    });
+  }
+
+// 分析窗口的全部落地细节在下面这几个 helper 里，主流程只管「问 → 判 → 铺」。
+
+  function wbPlanner() { return window.__WB_PLANNER__ || null; }
+
+  // 「分析窗口」开关：默认勾上（= 复用一个固定的调度窗口）。
+  function wbPlannerReuseOn() {
+    var box = WB.el && WB.el.querySelector("[data-wb-planner-reuse]");
+    return box ? !!box.checked : true;
+  }
+
+  // 有没有条件问分析窗口：得有 Harness 环境，且校验器已就位。
+  function wbPlanAskEnabled() {
+    return !!harnessEnv() && !!wbPlanner();
+  }
+
+  function wbSetAnalyzeBusy(on) {
+    var btn = WB.el && WB.el.querySelector("[data-wb-analyze]");
+    if (!btn) return;
+    btn.textContent = on ? "分析中…" : "分析";
+    if (on) btn.disabled = true;
+    else workbenchRefreshModeBtn();
+  }
+
+  // 调「分析窗口」：一次真实的 LLM 往返，让它回一段 JSON 计划。
+  // reuse=true → fresh:false（宿主接回映射表里那条会话，即「复用分析窗口」）；
+  // reuse=false → fresh:true（每次新开，结论不受上一轮影响）。
+  var WB_PLANNER_KEY = "调度台";
+  function wbAskPlanner(cards, batchSize, reuse, done) {
+    var P = wbPlanner();
+    if (!P) { done("", "没有计划校验器"); return; }
+    var known = (WB.knownWindows || []).map(function (w) {
+      return { key: w.key, lastCard: w.lastCard || "", lastAt: w.lastAt || "" };
+    });
+    var text = P.buildPlannerPrompt(cards, known, batchSize);
+    var finished = false;
+    harnessPostWithCapture(WB_PLANNER_KEY, text, !reuse, function (result) {
+      if (finished) return;
+      finished = true;
+      if (!result || !result.ok) { done("", (result && result.error) || "发送失败"); return; }
+      var askId = result.askId || "";
+      WP_ANSWERS[askId] = {
+        text: function (payload) {
+          if (finished) return;
+          finished = true;
+          delete WP_ANSWERS[askId];
+          if (payload.error) { done("", payload.error); return; }
+          done(payload.text || "", "");
+        },
+      };
+      setTimeout(function () {
+        if (!finished) { finished = true; delete WP_ANSWERS[askId]; done("", "等分析窗口回答超时"); }
+      }, 180000);
+    }, null, true);
+  }
+
+  // 把计划判成可用的 lanes（校验不过就回退）。
+  function wbResolvePlan(text, ids, prefixOf) {
+    var P = wbPlanner();
+    if (!P) return { lanes: null, source: "fallback", reason: "没有计划校验器" };
+    var map = {
+      get: function (k) { return prefixOf[k] || ""; },
+      has: function (k) { return Object.prototype.hasOwnProperty.call(prefixOf, k); },
+    };
+    return P.resolvePlan(text, ids, map);
+  }
+
+  // 记住这次用到的窗口名，下一轮分析时把它们作为「可复用的窗口」告诉 AI。
+  function workbenchRememberLanes(lanes) {
+    WB.knownWindows = (lanes || []).map(function (la) {
+      var last = la.cards && la.cards.length ? la.cards[la.cards.length - 1].id : "";
+      return { key: la.key || la.prefix || "", lastCard: last, lastAt: "刚刚" };
+    });
+  }
+
+  // 铺「多行队列」：一行 = 一路 = 一个对话窗口。
+  // 「一次喂几张」只影响同一路内第几张起要排队：这一路的第一批是要一起交给
+  // 这个窗口的，所以不标排队；从第二批起标「排队中 · 等 <它前面那一批的同位卡>」。
+  function workbenchRenderLanes(runEl, stepsEl, lanes, decided) {
+    var perBatch = WB.batchMode ? Number.MAX_VALUE : Math.max(1, WB.batchSize || 1);
+    var head = "";
+    if (decided) {
+      var isFb = decided.source !== "ai";
+      var label = decided.source === "pending"
+        ? "按区域分组 · 复核中"
+        : (isFb ? "回退 · 按区域分组" : "分析窗口分的");
+      var why = decided.reason ? "：" + esc(decided.reason) : "";
+      head = '<p class="wb-plan-note' + (isFb ? " is-fallback" : "") + '"><b>' + esc(label) + "</b>" +
+        why + "（共 " + (lanes || []).length + " 个窗口）</p>";
+    }
+    stepsEl.innerHTML = head + '<div class="wb-lanes">' + (lanes || []).map(function (la, li) {
+      return '<div class="wb-lane" data-wb-lane="' + li + '" data-wb-lane-key="' + esc(la.key || la.prefix || "") + '">' +
+        '<div class="wb-lane-name">' + esc(la.prefix || la.key || "") +
+        (la.why ? '<span class="wb-lane-why">' + esc(la.why) + "</span>" : "") + '</div>' +
+        '<ol class="wb-lane-cards">' + la.cards.map(function (o, i) {
+          var queued = i >= perBatch;
+          var st = queued ? "wb-step-queued" : "wb-step-pending";
+          var waitNote = queued
+            ? '<span class="wb-step-why">排队中 · 等 ' + esc(la.cards[i - perBatch].id) + '</span>'
+            : "";
+          return '<li class="wb-step ' + st + '" data-wb-step="' + esc(o.id) + '"' +
+            (queued ? ' data-wb-queued="1"' : '') + '>' +
+            '<span class="wb-step-i">' + (i + 1) + '</span>' +
+            '<span class="wb-step-id">' + esc(o.id) + '</span>' +
+            '<span class="wb-step-title">' + esc(o.title) + '</span>' + waitNote + '</li>';
+        }).join("") + '</ol></div>';
+    }).join("") + '</div>';
+  }
+
+  // 分析收尾：把 order 同步回 dragPool（保持用户手动摆的卡位不变）→ 记日志 → 放开「开始执行」。
+  function workbenchFinishAnalyze(useBatches) {
+    try {
+      var analyzedIds = (WB.order || []).map(function (o) { return o.id; });
+      if (analyzedIds.length) {
+        (WB.dragPool || []).length = 0;
+        analyzedIds.forEach(function (x) { if (WB.dragPool.indexOf(x) === -1) WB.dragPool.push(x); });
+      }
+    } catch (err) { /* 不影响执行 */ }
+    var laneN = (WB.lanes || []).length;
+    workbenchLog("分析完成。" + (useBatches
+      ? "卡已分成 " + laneN + " 条队列（每条一个对话窗口），每条队列一次交给它 " +
+        (WB.batchMode ? "全部卡" : (WB.batchSize || 1) + " 张") + "。"
+      : "串行 / 并行两种建议已排好，确认后点「开始执行」。"));
+    var start = WB.el.querySelector("[data-wb-start]");
+    if (start) start.disabled = !(WB.order || []).length;
+    workbenchRefreshModeBtn();
+  }
+
+  // 分析：先让一个「分析窗口」判断怎么分（并行时），再按它的计划铺队列。
+  // 串行不需要判断，直接走服务端的确定性排序。
   function workbenchAnalyze() {
     if (!wbPresent()) return;
     var ids = WB.dragPool || [];
@@ -1207,45 +1436,16 @@
         });
         // 「路」= area 前缀。一路一个会话窗口，路与路同时推进（与服务端 lanes 对齐）。
         // 分批只决定「一次喂几张」，不决定窗口数 —— 这是用户报「选了并行却只有一个窗口」的根因修复。
-        if (WB.batchMode) {
-          // 「整批全交（一次全给它）」按定义就是**一个窗口装全部**，不分路。
-          // 这里只造一条 lane，别让「按区域分窗口」把它拆成多个 —— 那是另一种语义。
-          WB.lanes = [{ prefix: "整批全交", cards: WB.order.slice() }];
-        } else {
-          WB.lanes = (res.lanes || []).map(function (la) {
-            return {
-              prefix: la.prefix,
-              cards: la.cards.map(function (c) {
-                return WB.order.filter(function (o) { return o.id === c.id; })[0];
-              }).filter(Boolean),
-            };
-          }).filter(function (la) { return la.cards.length; });
-        }
+        // 注意：这里**不预设** WB.lanes，交给下面「整批全交 / 分析窗口 / 回退」三条路各自定。
         runEl.hidden = false;
         runEl.classList.add("wb-run-parallel");
         // 并行/分批下 phase、progress 那行整体隐藏（与「每批 1 张」一致）
         runEl.querySelector("[data-wb-phase]").textContent = "";
         runEl.querySelector("[data-wb-progress]").textContent = "";
-        // 铺「多行队列」而不是「批次列表」：一行 = 一路 = 一个对话窗口。
-        // 「一次喂几张」只影响**同一路内**第几张起要排队：这一路的第一批是要一起
-        // 交给这个窗口的，所以不标排队；从第二批起标「排队中 · 等 <它前面那一批的同位卡>」。
-        var perBatch = WB.batchMode ? Number.MAX_VALUE : Math.max(1, WB.batchSize || 1);
-        stepsEl.innerHTML = '<div class="wb-lanes">' + WB.lanes.map(function (la, li) {
-          return '<div class="wb-lane" data-wb-lane="' + li + '">' +
-            '<div class="wb-lane-name">' + esc(la.prefix || "") + '</div>' +
-            '<ol class="wb-lane-cards">' + la.cards.map(function (o, i) {
-              var queued = i >= perBatch; // 同路第二批起要等前一批
-              var st = queued ? "wb-step-queued" : "wb-step-pending";
-              var waitNote = queued
-                ? '<span class="wb-step-why">排队中 · 等 ' + esc(la.cards[i - perBatch].id) + '</span>'
-                : "";
-              return '<li class="wb-step ' + st + '" data-wb-step="' + esc(o.id) + '"' +
-                (queued ? ' data-wb-queued="1"' : '') + '>' +
-                '<span class="wb-step-i">' + (i + 1) + '</span>' +
-                '<span class="wb-step-id">' + esc(o.id) + '</span>' +
-                '<span class="wb-step-title">' + esc(o.title) + '</span>' + waitNote + '</li>';
-            }).join("") + '</ol></div>';
-        }).join("") + '</div>';
+
+        // 「整批全交 / 分析窗口 / 回退」三条路统一在 workbenchPlanAndRender 里决定，
+        // 分批与不分批共用同一套判断，避免两条路径两套逻辑。
+        workbenchPlanAndRender(runEl, stepsEl);
       } else {
         // 旧模式：服务端给 serial/parallel，串/并行择一
         WB.batches = null;
@@ -1263,37 +1463,12 @@
           runEl.classList.add("wb-run-parallel");
           runEl.querySelector("[data-wb-phase]").textContent = "";
           runEl.querySelector("[data-wb-progress]").textContent = "";
-          var lanes = [];
-          var byPrefix = {};
-          order.forEach(function (o) {
-            var p = o.prefix || "?";
-            if (!byPrefix[p]) { byPrefix[p] = []; lanes.push({ prefix: p, cards: byPrefix[p] }); }
-            byPrefix[p].push(o);
-          });
-          WB.lanes = lanes;
-          // 「每批 1 张」时，一路里第二张起其实是在排队 —— 执行上 cap=1 只放一张，
-          // 但界面上它和正在跑的那张长得一样，用户会读成「这条队列里有两个任务」。
-          // 所以这里给排队卡单独一个状态 + 一句「排队中 · 等 XXX」，让「在跑」和「在等」一眼可分。
-          // 只在每批 1 张时这么做：每批 >1 / 整批时整批卡是要一起交给 Agent 的，本来就该全列出来。
-          var oneByOne = !WB.batchMode && (WB.batchSize === undefined || WB.batchSize <= 1);
-          stepsEl.innerHTML = '<div class="wb-lanes">' + lanes.map(function (la, li) {
-            return '<div class="wb-lane" data-wb-lane="' + li + '">' +
-              '<div class="wb-lane-name">' + esc(la.prefix || "") + '</div>' +
-              '<ol class="wb-lane-cards">' + la.cards.map(function (o, i) {
-                // 同路第二张起 = 排队（前一张没跑完轮不到它），标出它在等谁。
-                var queued = oneByOne && i > 0;
-                var st = queued ? "wb-step-queued" : "wb-step-pending";
-                var waitNote = queued
-                  ? '<span class="wb-step-why">排队中 · 等 ' + esc(la.cards[i - 1].id) + '</span>'
-                  : "";
-                return '<li class="wb-step ' + st + '" data-wb-step="' + esc(o.id) + '"' +
-                  (queued ? ' data-wb-queued="1"' : '') + '>' +
-                  '<span class="wb-step-i">' + (i + 1) + '</span>' +
-                  '<span class="wb-step-id">' + esc(o.id) + '</span>' +
-                  '<span class="wb-step-title">' + esc(o.title) + '</span>' + waitNote + '</li>';
-              }).join("") + '</ol></div>';
-          }).join("") + '</div>';
-        } else {
+          // 没分批的并行也走分析窗口：分批与否只影响「一次喂几张」，
+          // 「怎么分窗口、会不会冲突」都该由同一个判断方决定，不能两条路径两套逻辑。
+          workbenchPlanAndRender(runEl, stepsEl);
+          return;
+        }
+        {
           runEl.classList.remove("wb-run-parallel");
           runEl.querySelector("[data-wb-phase]").textContent = "串行执行";
           runEl.querySelector("[data-wb-progress]").textContent = "已选 " + res.total + " 件 · 待开始";
@@ -1305,18 +1480,10 @@
           }).join("");
         }
       }
+      // 串行分支直接走到这里收尾；并行/分批分支在上面各自 return 时已自行收尾。
       // 分析完成 → 更新工作台顺序，并重画「右缘→下一张左缘」的顺序箭头。
       // **不改动用户手动摆放的卡片位置**——画布顺序跟随工作台排好箭头即可。
-      try {
-        var analyzedIds = (WB.order || []).map(function (o) { return o.id; });
-        if (analyzedIds.length) {
-          (WB.dragPool || []).length = 0;
-          analyzedIds.forEach(function (x) { if (WB.dragPool.indexOf(x) === -1) WB.dragPool.push(x); });
-        }
-      } catch (err) { /* 不影响执行 */ }
-      workbenchLog("分析完成。" + (useBatches ? "卡已按区域拆成 " + (WB.lanes || []).length + " 条队列（每条一个对话窗口），每条队列一次交给它 " + (WB.batchMode ? "全部卡" : WB.batchSize + " 张") + "。" : "串行 / 并行两种建议已排好，确认后点「开始执行」。"));
-      var start = WB.el.querySelector("[data-wb-start]");
-      start.disabled = false;
+      workbenchFinishAnalyze(false);
     });
   }
 
@@ -1462,7 +1629,13 @@
         "台账文件在：" + (ledgerPath || "（当前看板目录）") + "\\ledger.json\n" +
         "本次交给你的卡片清单：\n" + listText + "\n\n" +
         "这是真实执行，不是分析建议：请实际处理并更新台账，处理完简要回报你动过的每张卡和它现在的状态。";
-      var fresh = true, inline = true;
+      // fresh:false = 复用这条队列已有的对话窗口（窗口复用）。
+      // 以前这里是 true，意味着**每批都新开一个会话**——一条路里 3 张卡、每批 1 张，
+      // 就是 3 个窗口，而不是「一个窗口接三次活」。那正是用户说的
+      // 「应该按分类复用窗口」没做到的地方。
+      // 复用键就是计划给的 lane.key（见 wbConvKey），所以同类任务会回到同一个窗口。
+      // 宿主侧对「映射表里的会话已被删」有兜底（会自动新建），这里不必自己防。
+      var fresh = false, inline = true;
       var finished = false;
       harnessPostWithCapture(wbConvKey(batchCards[0].id) || ("路 · " + (lane.prefix || "")), text, fresh, function (result) {
         if (finished) return;
@@ -1669,17 +1842,24 @@
   // 把一张卡交给 Harness，按 askId 收回答。支持并发：多个 ask 同时挂着，
   // 谁回来谁触发自己的回调 —— 用 WP_ANSWERS[askId] 对应每一个。
   var WP_ANSWERS = {};
-  // 并行「路」模式下，每张卡归属哪一路 → 会话键=该路。同一路的卡都复用
-  // 同一个会话键，所以左侧会话列表一条路一条对话；非并行（无 lanes）返回空。
+  // 并行「路」模式下，每张卡归属哪一路 → 会话键=该路。
+  // 同一路的卡都复用同一个会话键，所以左侧会话列表一条路一条对话；非并行（无 lanes）返回空。
+  //
+  // ⚠️ 会话键必须用**计划给的 key**（跨轮次稳定），不能用「路N · 前缀」这种按位置拼的：
+  // 位置会随这次分析的顺序变（AI 可能把重构成了 路1、数据源 路2），
+  // 位置一变键就变，窗口复用就永远接不上，等于每轮全新开窗口。
   function wbConvKey(id) {
     if (!WB.lanes || !WB.lanes.length) return "";
     for (var i = 0; i < WB.lanes.length; i++) {
-      for (var j = 0; j < WB.lanes[i].cards.length; j++) {
-        if (WB.lanes[i].cards[j].id === id) return "路" + (i + 1) + " · " + WB.lanes[i].prefix;
+      var la = WB.lanes[i];
+      for (var j = 0; j < la.cards.length; j++) {
+        if (la.cards[j].id === id) return la.key || la.prefix || ("路" + (i + 1));
       }
     }
     return "";
   }
+  // 同 __wb：只给测试/扩展用，正常页面不读它。
+  try { window.__wbConvKey = wbConvKey; } catch (e) {}
   // convKey：并行按「路」执行时，同一路的卡共用同一个会话键（左侧会话列表就
   // 是每路一条对话）。缺省 convKey=空 → 每张卡各自一个会话（按卡 id 圈定）。
   function workbenchAsk(itemTitle, done, convKey) {

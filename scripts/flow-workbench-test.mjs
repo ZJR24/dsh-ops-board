@@ -707,6 +707,107 @@ ok(/Harness/i.test(logAfter5k) && logAfter5k !== logBefore5k,
   (logAfter5k.slice(-90) || "(日志没变化)"));
 await ev(`window.__OPS_HARNESS__ = window.__OPS_HARNESS_BAK; 1`);
 
+console.log("\n[5l] 分析窗口的计划校验器：合法采纳、非法回退（同区域不许拆两个窗口）");
+// 这一层是安全底线：模型的输出不可信，校验不过必须整份回退。
+// 最要紧的一条是「同一区域不能拆进两个窗口」—— 那会让两个窗口抢同一块地。
+const planHas = await ev(`!!window.__WB_PLANNER__`);
+ok(planHas === true, "window.__WB_PLANNER__ 已注入页面");
+if (planHas) {
+  const planGood = await ev(`(function(){
+    var P = window.__WB_PLANNER__;
+    var pm = {get:function(k){return ({'A':'数据源','B':'重构','C':'免费额度'})[k]||''},has:function(k){return 'ABC'.indexOf(k)>-1;}};
+    var plan = {lanes:[{key:'数据源',cardIds:['A']},{key:'重构',cardIds:['B']},{key:'免费额度',cardIds:['C']}],note:'三路'};
+    var r = P.resolvePlan(JSON.stringify(plan), ['A','B','C'], pm);
+    return {source:r.source, n:r.lanes.length};
+  })()`);
+  ok(planGood && planGood.source === "ai" && planGood.n === 3,
+    "合法计划被采纳（source=ai / 3 路）", JSON.stringify(planGood));
+
+  const planMerge = await ev(`(function(){
+    var P = window.__WB_PLANNER__;
+    var pm = {get:function(k){return ({'A':'数据源','B':'重构'})[k]||''},has:function(){return true;}};
+    var plan = {lanes:[{key:'全串行',cardIds:['A','B']}]};
+    return P.resolvePlan(JSON.stringify(plan), ['A','B'], pm).source;
+  })()`);
+  ok(planMerge === "ai", "不同区域合并成一个窗口是合法的（等价串行）", String(planMerge));
+
+  const planSplit = await ev(`(function(){
+    var P = window.__WB_PLANNER__;
+    var pm = {get:function(k){return ({'A1':'数据源','A2':'数据源'})[k]||''},has:function(){return true;}};
+    var plan = {lanes:[{key:'x',cardIds:['A1']},{key:'y',cardIds:['A2']}]};
+    var r = P.resolvePlan(JSON.stringify(plan), ['A1','A2'], pm);
+    return {source:r.source, n:r.lanes.length, reason:r.reason};
+  })()`);
+  ok(planSplit && planSplit.source === "fallback",
+    "同区域拆两个窗口 → 整份回退", planSplit && planSplit.reason);
+  ok(planSplit && planSplit.n === 1, "回退后合回 1 路（按区域分组）", planSplit && planSplit.n + " 路");
+
+  const planJunk = await ev(`(function(){
+    var P = window.__WB_PLANNER__;
+    var pm = {get:function(){return '数据源'},has:function(){return true;}};
+    return P.resolvePlan('我觉得这样分比较好，你看着办', ['A','B'], pm).source;
+  })()`);
+  ok(planJunk === "fallback", "答非所问（纯文字没有 JSON）→ 回退", String(planJunk));
+
+  const planMissing = await ev(`(function(){
+    var P = window.__WB_PLANNER__;
+    var pm = {get:function(k){return ({'A':'数据源','B':'重构'})[k]||''},has:function(){return true;}};
+    var plan = {lanes:[{key:'x',cardIds:['A']}]};
+    return P.resolvePlan(JSON.stringify(plan), ['A','B'], pm).source;
+  })()`);
+  ok(planMissing === "fallback", "计划漏卡 → 回退（不能静默不执行某张）", String(planMissing));
+}
+
+console.log("\n[5m] 复用分析窗口开关默认勾上，且只在并行时出现");
+const plannerBox = await ev(`(function(){
+  var b = document.querySelector('[data-wb-planner-reuse]');
+  return b ? {exists:true, checked:b.checked} : {exists:false};
+})()`);
+ok(plannerBox && plannerBox.exists, "「复用分析窗口」开关在页面上");
+ok(plannerBox && plannerBox.checked === true, "默认勾上（= 默认复用）", JSON.stringify(plannerBox && plannerBox.checked));
+const plannerVisParallel = await ev(`(function(){
+  var r = document.querySelector('input[name=wb-mode][value=parallel]');
+  if (r) { r.checked = true; r.dispatchEvent(new Event('change',{bubbles:true})); }
+  var box = document.querySelector('[data-wb-planner-box]');
+  return box ? getComputedStyle(box).display : 'no-box';
+})()`);
+ok(plannerVisParallel !== "none" && plannerVisParallel !== "no-box",
+  "并行时可见（只有并行才建多窗口）", String(plannerVisParallel));
+const plannerVisSerial = await ev(`(function(){
+  var r = document.querySelector('input[name=wb-mode][value=serial]');
+  if (r) { r.checked = true; r.dispatchEvent(new Event('change',{bubbles:true})); }
+  var box = document.querySelector('[data-wb-planner-box]');
+  return box ? getComputedStyle(box).display : 'no-box';
+})()`);
+ok(plannerVisSerial === "none", "串行时隐藏", String(plannerVisSerial));
+
+console.log("\n[5n] 干活窗口的会话键 = 计划给的 key（跨轮次稳定，位置变了也不换窗口）");
+// 回归：原来会话键是「路N · 前缀」按位置拼的，AI 换一下顺序键就变 → 窗口复用永远接不上。
+const convKeyStable = await ev(`(function(){
+  var w = window.__wb;
+  var bak = w.lanes;
+  w.lanes = [
+    {key:'数据源', prefix:'数据源', cards:[{id:'OPS-025'}]},
+    {key:'重构',   prefix:'重构',   cards:[{id:'OPS-024'}]}
+  ];
+  var a1 = window.__wbConvKey ? window.__wbConvKey('OPS-025') : '(no export)';
+  // 顺序对调：位置变了，但每张卡的 key 不该变
+  w.lanes = [
+    {key:'重构',   prefix:'重构',   cards:[{id:'OPS-024'}]},
+    {key:'数据源', prefix:'数据源', cards:[{id:'OPS-025'}]}
+  ];
+  var a2 = window.__wbConvKey ? window.__wbConvKey('OPS-025') : '(no export)';
+  w.lanes = bak;
+  return {a1:a1, a2:a2};
+})()`);
+if (convKeyStable && convKeyStable.a1 && convKeyStable.a1 !== "(no export)") {
+  ok(convKeyStable.a1 === convKeyStable.a2,
+    "顺序变化后同一张卡的会话键不变（窗口能接上）",
+    convKeyStable.a1 + " == " + convKeyStable.a2);
+} else {
+  ok(true, "会话键未导出到 window，跳过（由渲染产物行为覆盖）");
+}
+
 console.log("\n[6] 服务没崩");
 ok(!/Error|throw/.test(stderr), "stderr 干净", stderr.slice(0, 120) || "(空)");
 

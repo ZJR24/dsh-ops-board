@@ -777,6 +777,10 @@ function workbenchBlock() {
         <option value="-1">整批全交（这条队列的全部卡一次给它）</option>
       </select>
     </div>
+    <div class="workbench-planner" data-wb-planner-box>
+      <label class="wb-mode-option"><input type="checkbox" data-wb-planner-reuse checked> 复用分析窗口（关掉 = 每次分析新开一个窗口，结论不受上一轮影响）</label>
+      <span class="wb-planner-hint">并行时，「分析」会先交给一个窗口判断这批卡怎么分、会不会互相冲突；它回的计划不合法就自动回退到按区域分组。</span>
+    </div>
     <div class="workbench-actions">
       <button type="button" class="btn" data-wb-analyze>分析</button>
       <button type="button" class="btn" data-wb-start disabled>开始执行</button>
@@ -837,6 +841,13 @@ function buildHtml(config, ledger) {
   ].join("\n");
 
   const clientJs = readFileSync(join(HERE, "lib", "client.js"), "utf8");
+  // 分析窗口的计划校验器（planner.mjs）也内联进去：它必须和页面同源运行，
+  // 因为「计划不合法就回退」要在客户端当场判，不能等一次网络往返。
+  // 去掉 ESM 的 export 关键字后包进 IIFE，只暴露一个全局，避免污染。
+  const plannerSrc = readFileSync(join(HERE, "lib", "planner.mjs"), "utf8")
+    .replace(/^export\s+function\s+/gm, "function ")
+    .replace(/^export\s+const\s+/gm, "const ");
+  const plannerJs = `(function(){\n${plannerSrc}\nwindow.__WB_PLANNER__ = { extractPlanJson: extractPlanJson, validatePlan: validatePlan, fallbackLanes: fallbackLanes, resolvePlan: resolvePlan, buildPlannerPrompt: buildPlannerPrompt };\n})();`;
   const boardData = JSON.stringify(boardContext(config, ledger, skillsData)).replace(/</g, "\\u003c");
   const title = `${ledger.project.name} · ${ledger.project.subtitle || ""}`;
 
@@ -865,6 +876,7 @@ ${views}
 ${aiPanel(config)}
 ${overlays(config)}
 <script type="application/json" id="board-data">${boardData}</script>
+<script>${plannerJs}</script>
 <script>${clientJs}</script>
 </body>
 </html>`;

@@ -436,6 +436,15 @@ tbody tr:hover{background:var(--surface)}
 .workbench-actions{display:flex;gap:8px;flex-wrap:wrap}
 .workbench-actions .btn{font-family:var(--sans)}
 .workbench-actions .btn:disabled{opacity:.45;cursor:not-allowed}
+/* 分析窗口开关：只对「并行」有意义（串行不建多窗口），所以和分批一样按模式显隐 */
+.workbench-planner{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;font-family:var(--sans);font-size:11.5px}
+.workbench-controls:not(:has(input[name=wb-mode][value=parallel]:checked)) .workbench-planner{display:none}
+.wb-planner-hint{color:var(--muted);font-size:10.5px;line-height:1.5;flex:1 1 320px}
+/* 分析窗口出来的计划：可读地列出它怎么分的，以及是「AI 分的」还是「回退的」 */
+.wb-plan-note{font-family:var(--sans);font-size:11px;color:var(--muted);line-height:1.6;margin:0 0 8px;padding:6px 8px;border-left:2px solid var(--rule2);background:var(--surface-soft)}
+.wb-plan-note b{color:var(--ink);font-weight:600}
+.wb-plan-note.is-fallback{border-left-color:var(--warn, #b8860b)}
+.wb-lane-why{display:block;font-family:var(--sans);font-size:10px;color:var(--muted);margin-top:2px}
 .workbench-run{margin-top:12px;border-top:1px solid var(--rule);padding-top:10px}
 .workbench-run-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 .wb-run-phase{font-family:var(--sans);font-size:11.5px;font-weight:700;color:var(--head)}
