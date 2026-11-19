@@ -756,6 +756,20 @@ if (planHas) {
     return P.resolvePlan(JSON.stringify(plan), ['A','B'], pm).source;
   })()`);
   ok(planMissing === "fallback", "计划漏卡 → 回退（不能静默不执行某张）", String(planMissing));
+
+  // 第 7 条：lane.key 就是干活窗口的会话键，撞上「调度台」会让干活窗口
+  // 接进分析窗口那条会话 —— 上下文互相污染。
+  const planReserved = await ev(`(function(){
+    var P = window.__WB_PLANNER__;
+    var pm = {get:function(k){return ({'A':'数据源'})[k]||''},has:function(){return true;}};
+    var plan = {lanes:[{key: P.PLANNER_WINDOW_KEY, cardIds:['A']}]};
+    var r = P.resolvePlan(JSON.stringify(plan), ['A'], pm);
+    return {source:r.source, reason:r.reason};
+  })()`);
+  ok(planReserved && planReserved.source === "fallback",
+    "lane.key 占用分析窗口的名字 → 回退", planReserved && planReserved.reason);
+  const reservedName = await ev(`window.__WB_PLANNER__ ? window.__WB_PLANNER__.PLANNER_WINDOW_KEY : null`);
+  ok(reservedName === "调度台", "分析窗口的保留名已导出（供 client.js 对齐）", String(reservedName));
 }
 
 console.log("\n[5m] 复用分析窗口开关默认勾上，且只在并行时出现");

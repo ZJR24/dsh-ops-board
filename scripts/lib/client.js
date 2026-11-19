@@ -1290,7 +1290,9 @@
   // 调「分析窗口」：一次真实的 LLM 往返，让它回一段 JSON 计划。
   // reuse=true → fresh:false（宿主接回映射表里那条会话，即「复用分析窗口」）；
   // reuse=false → fresh:true（每次新开，结论不受上一轮影响）。
-  var WB_PLANNER_KEY = "调度台";
+  // 分析窗口的会话键。**必须与 planner.mjs 的 PLANNER_WINDOW_KEY 一致** ——
+  // 校验器用它拒绝「lane.key 撞上分析窗口」的计划（撞了会让干活窗口接进分析窗口的会话）。
+  var WB_PLANNER_KEY = (wbPlanner() && wbPlanner().PLANNER_WINDOW_KEY) || "调度台";
   function wbAskPlanner(cards, batchSize, reuse, done) {
     var P = wbPlanner();
     if (!P) { done("", "没有计划校验器"); return; }

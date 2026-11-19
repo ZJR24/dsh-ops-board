@@ -34,6 +34,14 @@ export function extractPlanJson(text) {
   return null;
 }
 
+/**
+ * 分析窗口自己用的会话键。lane.key 是干活窗口的会话键，不能与它重名 ——
+ * 重名会让干活窗口接进分析窗口那条会话（上下文互相污染，见 validatePlan 第 7 条）。
+ * 这个值必须和 client.js 里的 WB_PLANNER_KEY 保持一致。
+ */
+export const PLANNER_WINDOW_KEY = "调度台";
+const RESERVED_KEYS = new Set([PLANNER_WINDOW_KEY]);
+
 function planTryParse(s) {
   try {
     const v = JSON.parse(String(s || "").trim());
@@ -68,6 +76,12 @@ export function validatePlan(plan, selectedIds, prefixOf) {
     const key = String(la.key || "").trim();
     if (!key) return { ok: false, error: "第 " + (i + 1) + " 条 lane 没有 key（复用键）" };
     if (keys.has(key)) return { ok: false, error: "lane key 重复：「" + key + "」" };
+    // 第 7 条：不许占用分析窗口自己的会话键。
+    // lane.key 就是干活窗口的会话键，撞上「调度台」会让干活窗口接进分析窗口那条会话 ——
+    // 分析窗口的上下文（它在判断怎么分批）会污染干活窗口，而且下一轮分析也会读到干活的产出。
+    if (RESERVED_KEYS.has(key)) {
+      return { ok: false, error: "lane key「" + key + "」是分析窗口自己在用的名字，换一个" };
+    }
     keys.add(key);
 
     const cardIds = Array.isArray(la.cardIds) ? la.cardIds.map(String).filter(Boolean) : [];

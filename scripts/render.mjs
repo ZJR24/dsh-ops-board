@@ -847,7 +847,7 @@ function buildHtml(config, ledger) {
   const plannerSrc = readFileSync(join(HERE, "lib", "planner.mjs"), "utf8")
     .replace(/^export\s+function\s+/gm, "function ")
     .replace(/^export\s+const\s+/gm, "const ");
-  const plannerJs = `(function(){\n${plannerSrc}\nwindow.__WB_PLANNER__ = { extractPlanJson: extractPlanJson, validatePlan: validatePlan, fallbackLanes: fallbackLanes, resolvePlan: resolvePlan, buildPlannerPrompt: buildPlannerPrompt };\n})();`;
+  const plannerJs = `(function(){\n${plannerSrc}\nwindow.__WB_PLANNER__ = { extractPlanJson: extractPlanJson, validatePlan: validatePlan, fallbackLanes: fallbackLanes, resolvePlan: resolvePlan, buildPlannerPrompt: buildPlannerPrompt, PLANNER_WINDOW_KEY: PLANNER_WINDOW_KEY };\n})();`;
   const boardData = JSON.stringify(boardContext(config, ledger, skillsData)).replace(/</g, "\\u003c");
   const title = `${ledger.project.name} · ${ledger.project.subtitle || ""}`;
 
