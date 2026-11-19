@@ -213,8 +213,8 @@ check("能读到台账数据", !!sample && !!sample.id, `样例 ${sample.id} · 
 check("找到正文里独有的词（用于测搜索范围）", !!sample.bodyWord, `"${sample.bodyWord}"`);
 
 // ── 顶栏入口 ──
-check("顶栏有「搜索」按钮", (await ev(`!!document.querySelector('#finder-open')`)) === true);
-check("顶栏有「设置」按钮", (await ev(`!!document.querySelector('#settings-open')`)) === true);
+check("报头右翼有「搜索」按钮", (await ev(`!!document.querySelector('#finder-open')`)) === true);
+check("报头右翼有「设置」按钮", (await ev(`!!document.querySelector('#settings-open')`)) === true);
 check("初始搜索层是收起的", (await finderOpen()) === false);
 check("初始设置层是收起的", (await settingsOpen()) === false);
 
@@ -233,7 +233,7 @@ check("Esc 收起搜索层", (await finderOpen()) === false);
 // ── 按编号搜：应当正好命中那一条 ──
 await ev(`document.querySelector('#finder-open').click()`);
 await sleep(150);
-check("点顶栏「搜索」也能打开", (await finderOpen()) === true);
+check("点报头右翼的「搜索」也能打开", (await finderOpen()) === true);
 
 await typeQuery(sample.id);
 const g1 = await groupCount();
@@ -324,7 +324,7 @@ check("点完搜索层收起", (await finderOpen()) === false);
 if (sample.bodyWord) {
   await ev(`document.querySelector('#settings-open').click()`);
   await sleep(150);
-  check("点顶栏「设置」打开设置层", (await settingsOpen()) === true);
+  check("点报头右翼的「设置」打开设置层", (await settingsOpen()) === true);
   await ev(`(() => {
     const s = document.querySelector('#set-scope');
     s.value = 'title';

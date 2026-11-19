@@ -226,7 +226,7 @@ await check(
   Math.abs(collapsed.centerOfRail) <= 2,
   `偏离本列中线 ${collapsed.centerOfRail}px · 列高 ${collapsed.railH}px`
 );
-await check("顶栏 / 导航没有额外开关", collapsed.extraBtn === false);
+await check("报头 / 导航没有额外开关", collapsed.extraBtn === false);
 await check("状态写进本机", collapsed.saved === "1");
 shots.push(await cdp.shot("02-rail-collapsed"));
 

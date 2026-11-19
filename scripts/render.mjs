@@ -181,7 +181,13 @@ function validate(config, ledger) {
 
 // ────────────────────────── 页面部件 ──────────────────────────
 
-function topbar(config, ledger) {
+function masthead(config, ledger) {
+  // 2026-11-19 起报头是一行三栏（原来那截「项目名 · 台账 ｜ 更新 … ｜ 三个按钮」自己占一行浮在上面）：
+  //   左翼「台账 · 更新 &lt;时间&gt;」 ｜ 中间项目名 + 副标题 ｜ 右翼「夜晚 / 护眼 / 纸面」+「导出 / 搜索 / 设置」。
+  // 项目名因此只出现一次 —— 顶栏原来又把书名重复了一遍。
+  // .topbar / .topbar-right / .topbar-btn / .theme-swatch 这几个类名刻意一个不改：
+  // 独立窗口形态（?chat=1）的隐藏规则和几套自检脚本都按它们定位。
+  // 报头两侧的统计耳朵（「问题 N 项 / 未收口 M · 已收口 K」）早已去掉（2026-11-16）。
   const swatches = [
     ["night", "夜晚"],
     ["eye", "护眼"],
@@ -192,24 +198,18 @@ function topbar(config, ledger) {
         `<button class="theme-swatch" type="button" data-theme="${k}"><i></i>${label}</button>`
     )
     .join("");
-  return `<div class="topbar">
-  <span>${esc(ledger.project.name)} · 台账</span>
+  return `<header class="masthead">
+  <div class="topbar"><span>台账 · 更新 ${esc(fmtDate(ledger.updatedAt))}</span></div>
+  <div class="masthead-title">
+    <h1>${esc(ledger.project.name)}</h1>
+    <div class="en">${esc(ledger.project.subtitle || "")}</div>
+  </div>
   <div class="topbar-right">
-    <span>更新 ${esc(fmtDate(ledger.updatedAt))}</span>
     <div class="theme-picker">${swatches}</div>
     <button class="topbar-btn" type="button" id="export-open" title="导出日报 / 周报 / 月报">导出</button>
     <button class="topbar-btn" type="button" id="finder-open" title="搜这块板（Ctrl+F）">搜索</button>
     <button class="topbar-btn" type="button" id="settings-open" title="看板设置">设置</button>
   </div>
-</div>`;
-}
-
-function masthead(config, ledger) {
-  // 报头两侧的统计耳朵（「问题 N 项 / 未收口 M · 已收口 K」）去掉了，
-  // 用户要更干净的头部：只留项目名和副标题。
-  return `<header class="masthead">
-  <h1>${esc(ledger.project.name)}</h1>
-  <div class="en">${esc(ledger.project.subtitle || "")}</div>
 </header>`;
 }
 
@@ -288,7 +288,6 @@ function viewSkills(config, ledger) {
   <div class="details-main">
     <div class="kicker">Skill 统计 · ${esc(config.labels.skillsTitle || "Agent 用过的与产出的")}</div>
     <h1 class="details-title">Skill 台账</h1>
-    <p class="rail-note">项目目录：${data && data.project ? `<code>${esc(data.project)}</code>` : "未登记"}${data && data.projectNames && data.projectNames.length ? ` · 别名：${esc(data.projectNames.join(" / "))}` : ""}${data && data.updatedAt ? ` · 统计于 ${relTime(data.updatedAt)}` : " · 还没有统计过"}</p>
     <div class="stage-board">
       <div class="stage-board-total"><span class="stage-board-num">${total}</span><span class="stage-board-label">共 ${total} 个 Skill</span></div>
       <div class="stage-board-table" style="grid-template-columns:repeat(3,1fr)">
@@ -852,7 +851,6 @@ function buildHtml(config, ledger) {
 </head>
 <body>
 <div class="page">
-${topbar(config, ledger)}
 ${masthead(config, ledger)}
 ${nav(config)}
 <div class="layout">

@@ -21,6 +21,9 @@
   Skill 页的数字表也提到「问 AI」之前。**总览页仍然没有状态表**（用户定的：工作台第一）。
 - **三个「按车道/页面聚合」的 AI 入口**：问题页「总结项目状态」（整本台账）、风险页「风险审核」（只审风险车道）、
   需求页「计划中」右侧「和 AI 谈谈要加什么」（只谈需求车道）—— 各自独立会话，互不串味。
+- **报头一行三栏**（2026-11-19 二十二改）：顶栏不再是报头上面独立的一行，
+  书名左边是「台账 · 更新 2026-11-17 23:55」，右边是「夜晚 / 护眼 / 纸面」+「导出 / 搜索 / 设置」。
+  项目名只在中间出现一次；760px 以下退化成「书名在上、两翼各一行」。
 - **工作台 = 候选池（待执行队列横排 + 备选区）+ 分析（串行/并行）+ 自动执行**。
 - **并行 = 多路队列**：点「分析」选并行，步骤区横排成多列 `.wb-lane`（每列一个区域前缀一路，纵向上到下列出该路整条链），不同路可同时推进（同一区域仍互斥，由 claim 保证）；
 - **并行每路一条独立对话**：并行执行时用 `wbConvKey(id)` 给 `workbenchAsk` 传 `convKey`，同一路的卡共用一个会话键 → 左侧 Harness 会话列表一条路一条对话；非并行每张卡各一个会话。
@@ -900,6 +903,58 @@ const claimsPath = resolve(argValue("claims") || join(ROOT, "flow-claims.json"))
 - **产物**：cyber 879.0 → **879.9 KB**、practise 381.7 → **382.5 KB**（收口页各多一块 5 格表）。
   条目数、视图数、id 唯一性都没变（61/11 卡，6 视图，id 154/101 全唯一）。
 
+**2026-11-19 二十二改（顶栏并进报头 + Skill 页去掉那行「项目目录 / 别名 / 统计于」）**
+
+> 用户原话：「Skill统计，项目目录：D:\WorkSpace-WeChat\cyber-egg-basket · 别名：cyber-egg-basket / 赛博鸡蛋篮 ·
+> 统计于 1 天前 这句话不要；更新 2026-11-17 23:55 赛博鸡蛋篮 · 台账　和　夜晚 护眼 纸面 导出 搜索 设置
+> 这两个部分分别放在赛博鸡蛋篮（标题）左右两百年」
+>
+> 「两百年」是「两边」的笔误，用户随后确认是**左右两翼**、不是上下堆叠。
+> 追问「左翼要不要带项目名」时用户选的是**去掉项目名**：左翼只留「台账 · 更新 2026-11-17 23:55」，
+> 因为 `h1` 已经写着「赛博鸡蛋篮」，再写一遍就是重复。
+
+- **① 删掉 Skill 页那行 `.rail-note`**（`render.mjs` 里 `viewSkills` 的第三行）。
+  原文是 `项目目录：<code>…</code> · 别名：… · 统计于 N 天前`，删后 Skill 页顺序变成
+  `kicker → 标题 → 状态表 → 问 AI → 三个分组`，中间不再插一行灰字。
+  - **只删这一行，不删数据**：`context.mjs` 仍把 `skills.project / projectNames / updatedAt` 塞进
+    `board-data`（`client.js:2043` 读 `D.skills`、`:2523` 数数），删 HTML 不会让它们变成孤儿；
+    `relTime()` 也留着 —— `skillRow()` 的「N 个会话 · 共调 M 次 · X 天前」还在用它。
+  - 顺带确认过：**没有任何测试断言这句文字**（`项目目录|统计于|别名|projectNames` 只出现在
+    `collect-skills.mjs`、`context.mjs`、README 的问 AI 载荷表和散文里）。
+
+- **② 顶栏整体并进报头，`topbar()` 函数被 `masthead()` 吸收**（`render.mjs` 原来两个函数现在一个）。
+  报头从「单栏居中书名」改成 **`grid-template-columns:minmax(0,1fr) auto minmax(0,1fr)`**：
+  | 栏 | 内容 |
+  |---|---|
+  | 左翼 `.topbar` | `台账 · 更新 2026-11-17 23:55`（**不含项目名**，靠 `justify-content:flex-start`） |
+  | 中栏 `.masthead-title` | `<h1>` 项目名 + `.en` 副标题 |
+  | 右翼 `.topbar-right` | `.theme-picker`（夜晚/护眼/纸面）+ `导出` / `搜索` / `设置` |
+  - **`.topbar` / `.topbar-right` / `.topbar-btn` / `.theme-swatch` 这些类名一个都没改**，
+    只把 `.topbar` 的 `border-bottom` 和 `padding` 在 `.masthead>.topbar` 里收掉。
+    这是刻意的：`html[data-chat="1"] .topbar`（独立窗口藏骨架）、`verify-board:58` 的结构清单、
+    `chatwin-test:168` / `standalone-e2e:161` / `chatwin-negative:47` 的选择器数组全按这些类名定位，
+    改名要同时动 5 个脚本，收益为零。**下次再想「顺手清理类名」时先看这一段。**
+  - **两侧各 `1fr`、中栏 `auto`**：左翼比右翼短不会把书名推歪。实测 1440 / 1180 / 1000 / 900
+    四档下 `h1` 中点与报头中点的偏差都是 **−1px**（亚像素舍入），两翼同一行、书名夹在中间。
+  - **760px 以下退化成三行**（`.masthead-title{order:-1}` 把书名提到最上，两翼各占一行居中）——
+    900px 还能撑住，560px 三栏就挤不开了。实测 560 / 760 都无横向溢出。
+  - `html[data-chat="1"] .masthead` 那条隐藏规则本来就有，报头整个藏掉，
+    里面嵌着的 `.topbar` / `.topbar-right` 跟着一起不可见 —— 独立窗口形态行为不变（实测 `display:none`）。
+
+- **③ 打印形态刻意改了**：`@media print` 原本藏 `.topbar`、**不**藏 `.masthead`，
+  合并后如果不额外处理，纸面上会多出「台账 · 更新 …」和三个主题色块。
+  现在打印块里补了 `.masthead{grid-template-columns:minmax(0,1fr)}` + `.masthead>.topbar-right{display:none!important}`
+  —— 纸面只剩书名和副标题，居中不变（实测打印媒体下两翼都是 `none`、`cols=657px` 单栏）。
+  `verify-board` **没有**任何打印断言，所以这是设计决定，不是「测试逼的」。
+
+- **④ 只改了措辞的自检**：`finder-settings-test` 4 处、`report-ui-test` 1 处、`uitest` 1 处里
+  写着「顶栏有「搜索」/「设置」/「导出」」的**断言文字**改成「报头右翼有…」，
+  选择器（`#finder-open` / `#settings-open` / `#export-open`）一个没动，项数不变。
+
+- **⑤ 回归**：双板 `verify-board` 通过；`stage-ask-test` **46/0（cyber）· 41/0（practise）**（项数不变）；
+  `uitest` 双板「交互验收通过」；`npm run gate` **25 通过 / 0 失败**。
+  产物体积 cyber 879.9 → **881.2 KB**、practise 382.5 → **383.9 KB**（报头多了两翼的按钮和色块）。
+
 ---
 
 
@@ -929,9 +984,9 @@ node scripts\<测试名>.mjs --board "D:\WorkSpace-Tools\ops-board-reports\<看�
 ⚠️ `float-negative.mjs` / `chatwin-negative.mjs` **故意没进 gate**：它们是负向验收，会临时改坏
 `client.js`/`css.mjs` 再还原，中途被打断会留下坏源码。
 
-### 5.2 基线（全部绿，2026-11-19 二十一改后实测）
+### 5.2 基线（全部绿，2026-11-19 二十二改后实测）
 
-**总基线：`npm run gate` → 25 通过 / 0 失败（288.3–288.6s，两次实测）；`npm test`（--fast）→ 14 通过 / 0 失败（约 188s）。**
+**总基线：`npm run gate` → 25 通过 / 0 失败（288.3–288.6s 二十一改 / **290.6s** 二十二改）；`npm test`（--fast）→ 14 通过 / 0 失败（约 188s）。**
 **另需人工跑 `npm run uitest`（双板）→ 交互验收通过** —— 它不在 gate 的 25 项里，改渲染相关的东西必须单独跑。
 
 | 套件 | 结果 | 说明 |

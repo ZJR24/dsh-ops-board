@@ -83,10 +83,24 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .rail-toggle:focus-visible{outline:1px solid var(--red);outline-offset:-3px}
 
 /* ── 报头 ── */
-.masthead{text-align:center;padding:10px 0 9px;border-bottom:4px double var(--ink);position:relative}
+.masthead{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:4px 16px;text-align:center;padding:8px 0 9px;border-bottom:4px double var(--ink);position:relative}
 .masthead h1{margin:0;font-size:clamp(24px,3vw,34px);line-height:1.1;letter-spacing:.1em;font-weight:700}
 .masthead .en{font-family:var(--sans);font-size:9.5px;letter-spacing:.18em;color:var(--muted);margin-top:3px}
+.masthead-title{min-width:0}
+/* 顶栏（2026-11-19 并进报头）：书名左边放「台账 · 更新 …」，右边放「夜晚 / 护眼 / 纸面」
+   和「导出 / 搜索 / 设置」。两侧各 1fr、中间 auto —— 左翼比右翼短也不会把书名推歪。
+   .topbar / .topbar-right / .topbar-btn 这几个类名刻意保留：独立窗口形态（?chat=1）的隐藏规则
+   和几套自检脚本都按它们定位，这里只把原来那条分隔线和内边距收掉，让它俩变成报头两翼。 */
+.masthead>.topbar{display:flex;justify-content:flex-start;gap:2px 8px;flex-wrap:wrap;border-bottom:0;padding:0;text-align:left}
+.masthead>.topbar-right{justify-content:flex-end;gap:4px 10px;text-align:right}
 /* 报头两侧的统计耳朵（ears 一族）已随该块删除（2026-11-16），用户要更干净的头部。 */
+/* 760px 以下三栏挤不开了：书名提到最上面，两翼各占一行居中。
+   900px 那档还能撑住 —— 两翼里的东西都是 flex-wrap 的，宁可折行也不会撑出横向滚动条。 */
+@media (max-width:760px){
+  .masthead{grid-template-columns:minmax(0,1fr);gap:3px}
+  .masthead-title{order:-1}
+  .masthead>.topbar,.masthead>.topbar-right{justify-content:center;text-align:center}
+}
 
 /* ── 导航 ── */
 .nav{position:sticky;top:0;z-index:30;display:flex;gap:4px;justify-content:center;padding:8px 0 7px;border-bottom:1px solid var(--rule2);font-family:var(--sans);font-size:11px;letter-spacing:.08em;color:var(--muted);background:var(--paper);box-shadow:0 8px 14px -12px rgba(30,28,23,.6)}
@@ -766,6 +780,10 @@ html[data-chat="1"] #ai-float-toggle{display:none}
 @media print{
   :root{--page:#fff;--paper:#fff;--surface:#fff;--surface-soft:#fff;--surface-strong:#fff}
   .rail,.nav,.topbar,.card-acts,.ai-panel,.finder,.settings{display:none!important}
+  /* 上纸只留书名：报头两翼的更新时间、色块、按钮都是屏幕上的开关。
+     .topbar 上面那行已经藏掉了，这里把报头的三栏网格收回一栏，书名照样居中。 */
+  .masthead{grid-template-columns:minmax(0,1fr)}
+  .masthead>.topbar-right{display:none!important}
   .layout{grid-template-columns:1fr}
   .views{padding-left:0;border-left:0}
   .view{display:block!important;page-break-before:always}

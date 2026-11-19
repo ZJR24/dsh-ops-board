@@ -148,7 +148,7 @@ await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/` });
 await sleep(1800);
 
 console.log("\n[1] 入口");
-ok("顶栏有「导出」按钮", await evaluate(`!!document.getElementById("export-open")`));
+ok("报头右翼有「导出」按钮", await evaluate(`!!document.getElementById("export-open")`));
 ok(
   "点之前面板是关的",
   (await evaluate(`document.getElementById("exporter").classList.contains("is-open")`)) === false
