@@ -140,7 +140,10 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 }
 .view{display:none}
 .view.is-active{display:block}
-.main-col{min-width:0}
+/* 总览页的内容列。顶部留白和 .details-main 对齐（22px）：
+   不写这一条，工作台的上边框就正好贴着导航底边（实测 0px），
+   而左边索引栏有 24px，两栏的「头」就错开了。 */
+.main-col{min-width:0;padding:22px 0 24px}
 .history{padding:20px 0 6px}
 
 /* 跳过去的落点要看得见：跨视图跳转后闪一下，否则用户不知道该看哪 */
@@ -381,8 +384,10 @@ tbody tr:hover{background:var(--surface)}
 
 /* ── 工作台（自动执行） ── */
 /* 挂载点：工作台是单实例节点，切视图时被搬进当前页的这个空位。
-   挂载点本身不画东西，只负责占位与顶部间距（工作台自己还有 margin-top）。
-   总览页是它默认落点，所以这里把上方留白交给它，别和工作台的外边距叠双份。 */
+   挂载点本身不画东西，也不负责留白 —— 顶部的间距由容器的上内边距给：
+   总览页是 .main-col 的 22px，别的页是 .details-main 的 22px。
+   所以这里必须把工作台自己的 margin-top 收掉，否则会在容器留白上再叠 18px
+   （挂载点落在 .wb-mount 里时）。 */
 .wb-mount{display:block}
 .wb-mount:empty{display:none}
 .wb-mount>.workbench{margin-top:0}
