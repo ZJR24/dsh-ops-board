@@ -433,9 +433,6 @@ tbody tr:hover{background:var(--surface)}
 .workbench-controls:not(:has(input[name=wb-mode][value=parallel]:checked)) .workbench-batch{display:none}
 .wb-batch-label{color:var(--muted)}
 .wb-batch-size{font-family:var(--sans);font-size:11.5px;padding:2px 6px;border:1px solid var(--rule);background:var(--paper);color:var(--ink);border-radius:3px}
-.wb-batch{display:block;margin:8px 0;border:1px dashed var(--rule2);border-radius:4px;padding:6px 8px}
-.wb-batch-head{display:flex;align-items:baseline;gap:8px;font-size:11px;font-weight:700;color:var(--ink);padding-bottom:4px}
-.wb-batch-reason{font-weight:400;font-size:9.5px;color:var(--muted)}
 .workbench-actions{display:flex;gap:8px;flex-wrap:wrap}
 .workbench-actions .btn{font-family:var(--sans)}
 .workbench-actions .btn:disabled{opacity:.45;cursor:not-allowed}

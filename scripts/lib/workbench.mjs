@@ -114,10 +114,16 @@ export function planWorkbench(config, ledger, selected, ordered) {
  * 这里只负责给每批里的每张卡补齐元数据（title/prefix/status/stepLabel/reason），
  * 不做自动拆串/并行——批次是用户（看板）定的，引擎只执行、不越权重排。
  *
+ * ⚠️ 关于「并行 = 多个对话窗口」（2026-11-19 修）：
+ * 批次的切分只决定「一次喂几张」，**不决定窗口数**。窗口按 area 前缀（=「路」）划分，
+ * 一条路一个会话——因为同前缀的卡抢同一块地，本来就必须串行，塞进同一个窗口正合适；
+ * 不同前缀互不相干，各开一个窗口才能真正同时推进。
+ * 所以这里额外返回 lanes（按 prefix 分组的卡），供前端建会话键。
+ *
  * @param {object} config   看板配置
  * @param {object} ledger   台账
  * @param {string[][]} batches 手动分的批，每批是一组卡 id（保持用户拖的顺序）
- * @returns {{ ok, total, batches:[{reason, cards:[{id,title,prefix,status,stepLabel}]}] }}
+ * @returns {{ ok, total, maxParallel, lanes, batches }}
  */
 export function planBatches(config, ledger, batches) {
   const items = (ledger.items || []).filter(Boolean);
@@ -145,12 +151,31 @@ export function planBatches(config, ledger, batches) {
     outBatches.push({
       index: bi,
       // reason 只描述「这是用户分的第几批」，不再让引擎猜语义
-      reason: cards.length > 1 ? "看板手动分为一批（可并行，Agent 自主规划批内）" : "看板手动分为一批（单卡）",
+      reason: cards.length > 1 ? "看板手动分为一批（同一路内依次处理）" : "看板手动分为一批（单卡）",
       cards,
     });
     total += cards.length;
   });
-  return { ok: total > 0, total, batches: outBatches };
+
+  // 按 area 前缀分组 = 「路」。一路一个对话窗口，路与路之间同时推进。
+  // 顺序沿用用户拖的顺序（先拖的批内卡在前），只在组内保持。
+  const laneMap = new Map();
+  const lanes = [];
+  outBatches.forEach((b) => {
+    b.cards.forEach((c) => {
+      const p = c.prefix || "(未分区域)";
+      if (!laneMap.has(p)) { laneMap.set(p, []); lanes.push({ prefix: p, cards: laneMap.get(p) }); }
+      laneMap.get(p).push(c);
+    });
+  });
+
+  return {
+    ok: total > 0,
+    total,
+    maxParallel: lanes.length, // 同轮最多能开几个窗口
+    lanes,
+    batches: outBatches,
+  };
 }
 
 /** 旧的自动分组串行：同区域排成连着的一段，段按步序排序。 */

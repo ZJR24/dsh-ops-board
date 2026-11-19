@@ -765,16 +765,16 @@ function workbenchBlock() {
     </div>
     <div class="workbench-mode">
       <label class="wb-mode-option"><input type="radio" name="wb-mode" value="serial" checked> 串行（一次一件，每张有建议顺序）</label>
-      <label class="wb-mode-option"><input type="radio" name="wb-mode" value="parallel"> 并行（拆成多行队列，每路同时推进）</label>
+      <label class="wb-mode-option"><input type="radio" name="wb-mode" value="parallel"> 并行（每条队列一个对话窗口，多路同时推进）</label>
     </div>
     <div class="workbench-batch" data-wb-batch>
-      <span class="wb-batch-label">一次喂几张给 Agent 自主处理：</span>
+      <span class="wb-batch-label">每条队列一次喂几张（一条队列 = 一个对话窗口）：</span>
       <select class="wb-batch-size" data-wb-batch-size>
-        <option value="1" selected>每批 1 张（一张一张来）</option>
+        <option value="1" selected>每批 1 张（窗口一次拿一张，做完再给它下一张）</option>
         <option value="2">每批 2 张</option>
         <option value="3">每批 3 张</option>
         <option value="5">每批 5 张</option>
-        <option value="-1">整批全交（一次全给它）</option>
+        <option value="-1">整批全交（这条队列的全部卡一次给它）</option>
       </select>
     </div>
     <div class="workbench-actions">

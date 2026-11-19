@@ -280,23 +280,24 @@ await ev(`document.querySelector('[data-wb-addall]').click(); window.__wb.batchS
 await wait(400);
 await ev(`document.querySelector('[data-wb-analyze]').click()`);
 await wait(1800);
-const batchCount = await ev(`document.querySelectorAll('[data-wb-steps] .wb-batch').length`);
-const expectBatches = Math.max(1, Math.ceil(EXPECT / 3));
-ok(batchCount === expectBatches, EXPECT + " 张按每批 3 张分成 " + expectBatches + " 批", "实际 " + batchCount + " 批");
-const batchCardTotal = await ev(`Array.prototype.reduce.call(document.querySelectorAll('[data-wb-steps] .wb-batch'), function(n,b){ return n + b.querySelectorAll('.wb-step').length; }, 0)`);
-ok(batchCardTotal === EXPECT, "批内卡总数仍是 " + EXPECT, "实际 " + batchCardTotal);
-const batchPhase = await ev(`document.querySelector('[data-wb-phase]').textContent`);
-ok(/分批执行/.test(batchPhase), "执行区标为「分批执行」", batchPhase);
+const batchCount = await ev(`document.querySelectorAll('[data-wb-steps] .wb-lane').length`);
+ok(batchCount >= 1, EXPECT + " 张按每批 3 张 → 铺成按区域分的「路」（一路一个对话窗口）", "实际 " + batchCount + " 路");
+const batchCardTotal = await ev(`document.querySelectorAll('[data-wb-steps] .wb-step').length`);
+ok(batchCardTotal === EXPECT, "路内卡总数仍是 " + EXPECT, "实际 " + batchCardTotal);
+const batchHeadHidden = await ev(`getComputedStyle(document.querySelector('[data-wb-run] .workbench-run-head')).display`);
+ok(batchHeadHidden === "none", "并行时隐藏 phase/progress 说明行（只留队列本身）", "display=" + batchHeadHidden);
 
 console.log("\n[5f] 整批全交：一批全部卡交给一个 Agent 自主");
 await ev(`document.querySelector('[data-wb-batch-size]').value='-1'; window.__wb.batchSize=99999; window.__wb.batchMode=true; 1`);
 await wait(400);
 await ev(`document.querySelector('[data-wb-analyze]').click()`);
 await wait(1800);
-const wholeBatchCount = await ev(`document.querySelectorAll('[data-wb-steps] .wb-batch').length`);
-ok(wholeBatchCount === 1, "整批全交 → 只分成 1 批", "实际 " + wholeBatchCount + " 批");
-const wholeBatchCardTotal = await ev(`document.querySelectorAll('[data-wb-steps] .wb-batch')[0].querySelectorAll('.wb-step').length`);
-ok(wholeBatchCardTotal === EXPECT, "这 1 批包含全部 " + EXPECT + " 张卡", "实际 " + wholeBatchCardTotal);
+const wholeBatchCount = await ev(`document.querySelectorAll('[data-wb-steps] .wb-lane').length`);
+ok(wholeBatchCount === 1, "整批全交 → 只开 1 个窗口（全部卡装进同一路）", "实际 " + wholeBatchCount + " 路");
+const wholeBatchCardTotal = await ev(`document.querySelectorAll('[data-wb-steps] .wb-lane')[0].querySelectorAll('.wb-step').length`);
+ok(wholeBatchCardTotal === EXPECT, "这 1 个窗口包含全部 " + EXPECT + " 张卡", "实际 " + wholeBatchCardTotal);
+const wholeBatchQueued = await ev(`document.querySelectorAll('[data-wb-steps] .wb-step-queued').length`);
+ok(wholeBatchQueued === 0, "整批全交时没有卡标「排队中」（全部一次交给该窗口）", "实际 " + wholeBatchQueued + " 张");
 
 console.log("\n[5g] 分批真实执行：整批 claim → 交给 Agent → release → 卡片全部收口");
 
@@ -320,8 +321,8 @@ await ev(`window.__wb.dragPool=(window.__wb.dragPool||[]).filter(function(id){re
 await wait(300);
 await ev(`document.querySelector('[data-wb-analyze]').click()`);
 await wait(1600);
-const exBatchCount = await ev(`document.querySelectorAll('[data-wb-steps] .wb-batch').length`);
-ok(exBatchCount === 1, "整批全交 " + readyHeads.length + " 张 → 1 批", "实际 " + exBatchCount + " 批");
+const exBatchCount = await ev(`document.querySelectorAll('[data-wb-steps] .wb-lane').length`);
+ok(exBatchCount === 1, "整批全交 " + readyHeads.length + " 张 → 1 个对话窗口", "实际 " + exBatchCount + " 路");
 
 // 注入 Harness 环境 + 模拟 Agent：拦截 /ops-board/ask，登记 askId，随后回一条 ok 的 answer。
 const stubResult = await ev(`(async function(){
@@ -332,7 +333,7 @@ const stubResult = await ev(`(async function(){
     if (String(url).indexOf('/ops-board/ask') === 0 && opts && opts.method === 'POST'){
       var body = JSON.parse(opts.body); var askId = body.askId;
       window.__wbStub.asks++;
-      window.__wbStub.asked.push({ askId: askId, hasBatch: /本批卡片清单/.test(body.question), questionLen: (body.question||'').length });
+      window.__wbStub.asked.push({ askId: askId, hasBatch: /本次交给你的卡片清单/.test(body.question), questionLen: (body.question||'').length, item: body.item, title: body.title });
       return Promise.resolve({ ok: true, json: function(){ return Promise.resolve({ ok: true, askId: askId }); } });
     }
     return origFetch(url, opts);
@@ -378,12 +379,104 @@ ok(exj.runStill === false, "执行完成后 WB.run 已复位");
 
 console.log("\n[5h] 分批问 Agent 的提示词确实携带整批清单");
 const batchPromptOk = await ev(`window.__wbStub.asked.some(function(a){ return a.hasBatch && a.questionLen > 200; })`);
-ok(batchPromptOk, "某次 ask 的 question 携带「本批卡片清单」且足够长（整批交给 Agent 自主）");
+ok(batchPromptOk, "某次 ask 的 question 携带「本次交给你的卡片清单」且足够长（整批交给 Agent 自主）");
 
-console.log("\n[5i] 并行 + 每批 1 张：执行中同时只有 1 张在跑（不再同时两张）");
+console.log("\n[5h2] 并行真并发：多路同时开跑（用户报「选了并行却只给一个窗口」）；每批 2 张，同路内第二批要等");
+// 用户原话：「看板的工作台，选择了并行处理3个任务，但是没有给到两个对话窗口处理，而是给到一个窗口处理」。
+// 根因：旧实现把「一次喂几张」当成窗口划分依据，整批塞进固定会话键「本批 N 卡」——
+// 卡数一样时两批撞进同一个窗口，于是永远只有一个窗口。修复后窗口 = 路（area 前缀）。
+// 这里用**跨区域**的可开工卡（各自区域头件，才能同时 claim 成功）真实跑一遍：
+//   · ask 数 = 路数（不是 1，也不是 ceil(卡数/2)）；
+//   · 每次 ask 的 item 互不相同（不再有「本批 2 卡」撞键）；
+//   · 至少出现过一次「两个窗口同时在跑」（并发 > 1），这才是并行的定义。
+const headByPrefix = await ev(`(function(){
+  var seen = {}, out = [];
+  (window.__wb.candidate || []).forEach(function(c){
+    if (c.state !== 'ready') return;
+    var p = c.prefix || '?';
+    if (seen[p]) return;
+    seen[p] = 1; out.push(c.id);
+  });
+  return out;
+})()`);
+if (headByPrefix.length < 2) {
+  ok(true, "[跳过] 跨区域可开工头件不足 2 张（" + headByPrefix.length + "），无法验证多窗口并发");
+} else {
+await ev(`document.querySelector('[data-wb-clear]').click(); 1`);
+await wait(500);
+await ev(`document.querySelector('[data-wb-addall]').click(); 1`);
+await wait(300);
+await ev(`window.__wb.dragPool = ${JSON.stringify(headByPrefix)}; window.__wb.batchSize=2; window.__wb.batchMode=false; 1`);
+await ev(`document.querySelector('input[name=wb-mode][value=parallel]').checked=true; document.querySelector('input[name=wb-mode][value=parallel]').dispatchEvent(new Event('change',{bubbles:true})); var s=document.querySelector('[data-wb-batch-size]'); s.value='2'; s.dispatchEvent(new Event('change',{bubbles:true})); 1`);
+await wait(300);
+await ev(`document.querySelector('[data-wb-analyze]').dispatchEvent(new MouseEvent('click',{bubbles:true})); 1`);
+await wait(1800);
+const lanePlan = JSON.parse(await ev(`JSON.stringify({
+  lanes: (window.__wb.lanes || []).length,
+  laneN: document.querySelectorAll('[data-wb-steps] .wb-lane').length
+})`));
+ok(lanePlan.lanes === headByPrefix.length && lanePlan.laneN === headByPrefix.length,
+  "并行 + 每批 2 张：窗口数 = 路数 " + headByPrefix.length + "（与「一次喂几张」无关）",
+  "WB.lanes=" + lanePlan.lanes + " · DOM=" + lanePlan.laneN);
+
+// 拦 ask，记录每个窗口的 item 与「同一时刻有几个窗口在跑」
+await ev(`(function(){
+  window.__wbLanes = { asked: [], maxConc: 0 };
+  var orig = window.fetch.bind(window);
+  window.fetch = function(url, opts){
+    if (String(url).indexOf('/ops-board/ask') === 0 && opts && opts.method === 'POST'){
+      var body = JSON.parse(opts.body);
+      var st = window.__wbLanes;
+      st.asked.push({ askId: body.askId, item: body.item });
+      var conc = Object.keys(window.__wb.inflight || {}).length;
+      if (conc > st.maxConc) st.maxConc = conc;
+      return Promise.resolve({ ok: true, json: function(){ return Promise.resolve({ ok: true, askId: body.askId }); } });
+    }
+    return orig(url, opts);
+  };
+  return 1;
+})()`);
+await ev(`document.querySelector('[data-wb-start]').dispatchEvent(new MouseEvent('click',{bubbles:true})); 1`);
+let laneSeen = 0;
+const laneDl = Date.now() + 20000;
+while (Date.now() < laneDl) {
+  await wait(400);
+  const n = await ev(`(function(){var a=window.__wbLanes.asked;var c=0;a.slice(${laneSeen}).forEach(function(x){window.postMessage({type:'ops-board/answer',askId:x.askId,ok:true,text:'已处理',by:'t'},'*');c++;});return c;})()`);
+  laneSeen += n;
+  const fin = await ev(`window.__wb.run === false`);
+  if (fin) break;
+}
+const laneRun = JSON.parse(await ev(`JSON.stringify((function(){
+  var st = window.__wbLanes;
+  var items = st.asked.map(function(a){ return a.item; });
+  return {
+    asks: st.asked.length,
+    distinctItems: items.filter(function(v,i){ return items.indexOf(v) === i; }).length,
+    maxConc: st.maxConc,
+    items: items,
+    doneN: window.__wb.order.filter(function(o){ return o.done; }).length,
+    totalN: window.__wb.order.length
+  };
+})())`));
+ok(laneRun.asks === headByPrefix.length,
+  "每个窗口各收到一次 ask（" + headByPrefix.length + " 个窗口 → " + headByPrefix.length + " 次，不是 1 次）",
+  "asks=" + laneRun.asks + " · item=" + laneRun.items.join(" / "));
+ok(laneRun.distinctItems === laneRun.asks,
+  "每次 ask 的会话键互不相同（不再撞进同一个窗口）",
+  laneRun.distinctItems + " 个不同键 / " + laneRun.asks + " 次");
+ok(laneRun.maxConc >= 2,
+  "确实多个窗口同时推进（并发峰值 ≥ 2，这才叫并行）",
+  "峰值并发 " + laneRun.maxConc);
+ok(laneRun.doneN === laneRun.totalN,
+  "所有路的卡都收口完成", laneRun.doneN + "/" + laneRun.totalN);
+}
+
+console.log("\n[5i] 并行 + 每批 1 张：**同一条队列里**同时只有 1 张在跑（路与路可以同时跑）");
 // 用户报「选了不分批（一张一张来），队列里还是会出现两张」——
-// 根因：并行 cap=maxParallel 会同时放多张。修复后 并行+批1 的 cap=1。
-// 这里真实走执行：claim→ask→release 循环，采样每次 ask 时同时 active / inflight 的张数。
+// 他看的是**一条队列**：同路第二张不该和头一张一起跑（它们抢同一块地）。
+// 2026-11-19 起语义更明确：窗口 = 路，「一次喂几张」只管路内批大小 ——
+// 所以「每批 1 张」= 每个窗口一次拿一张，跨路仍可同时推进（那是并行的本义）。
+// 这里真实走执行：claim→ask→release 循环，采样每次 ask 时**同一条路**的 active / inflight 张数。
 // 只喂现在可开工（ready）的卡，避免 waiting 卡在测试里永远 claim 不到卡死。
 const rdyNow = await ev(`(window.__wb.candidate || []).filter(function(c){ return c.state === 'ready'; }).map(function(c){ return c.id; })`);
 if (rdyNow.length < 2) {
@@ -402,15 +495,30 @@ await wait(1800);
 // 并行+批1 仍是多行队列（不是批次列表）——用户确认的形态
 const laneShown = await ev(`document.querySelectorAll('[data-wb-steps] .wb-lane').length`);
 ok(laneShown >= 1, "并行 + 每批 1 张 仍显示多行队列", laneShown + " 队");
-// 拦截 /ops-board/ask，记录每次 ask 时同时 active / inflight 的张数
+// 拦截 /ops-board/ask，按**路**记录每次 ask 时该路同时 active / inflight 的张数
 await ev(`(function(){
-  window.__wbOneByOne = { maxActive: 0, maxInflight: 0, samples: [] };
+  window.__wbOneByOne = { maxActive: 0, maxInflight: 0, samples: [], byLane: {}, perLaneMax: 0 };
+  function laneOf(id){
+    var ls = window.__wb.lanes || [];
+    for (var i = 0; i < ls.length; i++){
+      for (var j = 0; j < ls[i].cards.length; j++) if (ls[i].cards[j].id === id) return i;
+    }
+    return -1;
+  }
   var origFetch = window.fetch.bind(window);
   window.fetch = function(url, opts){
     if (String(url).indexOf('/ops-board/ask') === 0 && opts && opts.method === 'POST'){
       var askId = JSON.parse(opts.body).askId;
       var activeN = (window.__wb.order || []).filter(function(o){ return o.active; }).length;
       var inflightN = Object.keys(window.__wb.inflight || {}).length;
+      // 同一条路里现在有几张在跑（这才是「一张一张来」的判据）
+      var perLane = {};
+      (window.__wb.order || []).forEach(function(o){
+        if (!o.active) return;
+        var li = laneOf(o.id);
+        perLane[li] = (perLane[li] || 0) + 1;
+        if (perLane[li] > window.__wbOneByOne.perLaneMax) window.__wbOneByOne.perLaneMax = perLane[li];
+      });
       var s = window.__wbOneByOne;
       if (activeN > s.maxActive) s.maxActive = activeN;
       if (inflightN > s.maxInflight) s.maxInflight = inflightN;
@@ -431,7 +539,7 @@ while (Date.now() < oneDeadline) {
   await wait(500);
   const oneSent = await ev(`(function(){
     var s = 0;
-    var all = Object.keys(window.__wbOneByOne).filter(function(k){ return k !== 'maxActive' && k !== 'maxInflight' && k !== 'samples' && k !== '__c' && typeof window.__wbOneByOne[k] === 'object'; });
+    var all = Object.keys(window.__wbOneByOne).filter(function(k){ return k !== 'maxActive' && k !== 'maxInflight' && k !== 'samples' && k !== 'perLaneMax' && k !== 'byLane' && typeof window.__wbOneByOne[k] === 'object'; });
     all.slice(${oneSeen}).forEach(function(askId){
       window.postMessage({ type: 'ops-board/answer', askId: askId, ok: true, text: '已处理收口', by: 't' }, '*');
       s++;
@@ -445,10 +553,9 @@ while (Date.now() < oneDeadline) {
 await wait(1500);
 const oneSum = JSON.parse(await ev(`(function(){
   var s = window.__wbOneByOne;
-  return JSON.stringify({ maxActive: s.maxActive, maxInflight: s.maxInflight, samples: s.samples.join(','), doneN: window.__wb.order.filter(function(o){return o.done;}).length, totalN: window.__wb.order.length, asks: Object.keys(s).filter(function(k){ return typeof s[k] === 'object'; }).length });
+  return JSON.stringify({ maxActive: s.maxActive, maxInflight: s.maxInflight, perLaneMax: s.perLaneMax, samples: s.samples.join(','), doneN: window.__wb.order.filter(function(o){return o.done;}).length, totalN: window.__wb.order.length, asks: Object.keys(s).filter(function(k){ return typeof s[k] === 'object'; }).length });
 })()`));
-ok(oneSum.maxActive <= 1, "每批 1 张执行中同时只有 1 张 active（绝无两张）", "maxActive=" + oneSum.maxActive + " · 采样=" + oneSum.samples);
-ok(oneSum.maxInflight <= 1, "同时挂起的 inflight ≤ 1", "maxInflight=" + oneSum.maxInflight);
+ok(oneSum.perLaneMax <= 1, "每批 1 张：同一条队列里同时只有 1 张在跑（绝无两张挤一路）", "同路峰值=" + oneSum.perLaneMax + " · 采样=" + oneSum.samples);
 ok(oneSum.doneN === oneSum.totalN && oneSum.totalN >= 2, "全部卡都走完（至少 2 张，验证确实是逐张串行放行）", oneSum.doneN + "/" + oneSum.totalN);
 } // end else (rdyNow >= 2)
 
@@ -506,16 +613,24 @@ ok(queuedCards.every((c) => c.hasQueuedCls && c.border === "dashed"),
   queuedCards.length ? queuedCards[0].border : "(无排队卡)");
 ok(allCards.filter((c) => !c.queued).every((c) => c.border === "solid"), "头一张仍是实线边（不像在排队）");
 
-// 每批 2 张：恢复整批显示，不应残留排队标记
+// 每批 2 张：仍是「按路分行」的形态，但路内从第 3 张起才标排队（前 2 张一起交给该窗口）
 await ev(`var s=document.querySelector('[data-wb-batch-size]'); s.value='2'; s.dispatchEvent(new Event('change',{bubbles:true})); 1`);
 await wait(300);
 await ev(`document.querySelector('[data-wb-analyze]').dispatchEvent(new MouseEvent('click',{bubbles:true})); 1`);
 await wait(2500);
-const qAfterBatch2 = await ev(`document.querySelectorAll('[data-wb-steps] .wb-step-queued').length`);
-const batchBlocks = await ev(`document.querySelectorAll('[data-wb-steps] .wb-batch').length`);
-ok(batchBlocks >= 1 && qAfterBatch2 === 0,
-  "改成每批 2 张后回到整批清单，排队标记清零（整批卡本来就该全列出来）",
-  batchBlocks + " 批 / 排队标记 " + qAfterBatch2);
+const qAfterBatch2 = JSON.parse(await ev(`JSON.stringify((function(){
+  var lanes = [].slice.call(document.querySelectorAll('[data-wb-steps] .wb-lane'));
+  return {
+    laneN: lanes.length,
+    queued: document.querySelectorAll('[data-wb-steps] .wb-step-queued').length,
+    expectQueued: lanes.reduce(function(n,l){
+      return n + Math.max(0, l.querySelectorAll('.wb-step').length - 2);
+    }, 0)
+  };
+})())`));
+ok(qAfterBatch2.laneN >= 1 && qAfterBatch2.queued === qAfterBatch2.expectQueued,
+  "改成每批 2 张后仍是按路分行，且只有第 3 张起标排队（前 2 张一起交给窗口）",
+  qAfterBatch2.laneN + " 路 / 排队 " + qAfterBatch2.queued + "（应 " + qAfterBatch2.expectQueued + "）");
 
 // 串行：单列，不应有排队标记
 await ev(`document.querySelector('input[name=wb-mode][value=serial]').checked=true;
@@ -571,6 +686,26 @@ ok(maxQueuedDuringRun <= qBeforeRun, "执行过程中排队标记只会减少，
 ok(qAfterRun.queued === 0 && qAfterRun.queuedAttr === 0,
   "跑完后排队标记和 data-wb-queued 都清干净（不会挂着「等 X」自相矛盾）",
   "标记 " + qAfterRun.queued + " / 属性 " + qAfterRun.queuedAttr);
+
+console.log("\n[5k] 不在 Harness 面板里（没有 __OPS_HARNESS__）时，点开始必须给出可读原因，不能静默失败");
+// 回归：harnessPostWithCapture 原来直接读 env.id，env 为 null 时抛 TypeError，
+// 界面上表现为「点了开始执行什么都没发生」。现在必须把原因写进日志。
+await ev(`window.__wb.run = false; window.__wb.stop = false; window.__wb.inflight = {}; 1`);
+await ev(`window.__OPS_HARNESS_BAK = window.__OPS_HARNESS__; window.__OPS_HARNESS__ = null; 1`);
+const logBefore5k = await ev(`(function(){
+  var el = document.querySelector('[data-wb-phase]');
+  return el ? el.textContent.replace(/\\s+/g,' ').trim() : '';
+})()`);
+await ev(`document.querySelector('[data-wb-start]').dispatchEvent(new MouseEvent('click',{bubbles:true})); 1`);
+await wait(1200);
+const logAfter5k = await ev(`(function(){
+  var el = document.querySelector('[data-wb-phase]');
+  return el ? el.textContent.replace(/\\s+/g,' ').trim() : '';
+})()`);
+ok(/Harness/i.test(logAfter5k) && logAfter5k !== logBefore5k,
+  "日志里出现「不在 Harness 面板里」的原因（而不是静默无反应）",
+  (logAfter5k.slice(-90) || "(日志没变化)"));
+await ev(`window.__OPS_HARNESS__ = window.__OPS_HARNESS_BAK; 1`);
 
 console.log("\n[6] 服务没崩");
 ok(!/Error|throw/.test(stderr), "stderr 干净", stderr.slice(0, 120) || "(空)");

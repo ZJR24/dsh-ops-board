@@ -1205,17 +1205,47 @@
             });
           });
         });
+        // 「路」= area 前缀。一路一个会话窗口，路与路同时推进（与服务端 lanes 对齐）。
+        // 分批只决定「一次喂几张」，不决定窗口数 —— 这是用户报「选了并行却只有一个窗口」的根因修复。
+        if (WB.batchMode) {
+          // 「整批全交（一次全给它）」按定义就是**一个窗口装全部**，不分路。
+          // 这里只造一条 lane，别让「按区域分窗口」把它拆成多个 —— 那是另一种语义。
+          WB.lanes = [{ prefix: "整批全交", cards: WB.order.slice() }];
+        } else {
+          WB.lanes = (res.lanes || []).map(function (la) {
+            return {
+              prefix: la.prefix,
+              cards: la.cards.map(function (c) {
+                return WB.order.filter(function (o) { return o.id === c.id; })[0];
+              }).filter(Boolean),
+            };
+          }).filter(function (la) { return la.cards.length; });
+        }
         runEl.hidden = false;
-        runEl.querySelector("[data-wb-phase]").textContent = "分批执行 · 共 " + res.batches.length + " 批 · 整批交给 Agent 自主规划";
-        runEl.querySelector("[data-wb-progress]").textContent = "已选 " + res.total + " 件 · 待开始";
-        stepsEl.innerHTML = res.batches.map(function (b, bi) {
-          return '<li class="wb-batch" data-wb-batch="' + bi + '"><div class="wb-batch-head">第 ' + (bi + 1) +
-            " 批 · " + b.cards.length + " 卡<span class=\"wb-batch-reason\">" + esc(b.reason) + "</span></div><ol>" +
-            b.cards.map(function (c, ci) {
-              return '<li class="wb-step" data-wb-step="' + esc(c.id) + '"><span class="wb-step-i">' + (ci + 1) +
-                '</span><span class="wb-step-id">' + esc(c.id) + '</span><span class="wb-step-title">' + esc(c.title) + "</span></li>";
-            }).join("") + "</ol></li>";
-        }).join("");
+        runEl.classList.add("wb-run-parallel");
+        // 并行/分批下 phase、progress 那行整体隐藏（与「每批 1 张」一致）
+        runEl.querySelector("[data-wb-phase]").textContent = "";
+        runEl.querySelector("[data-wb-progress]").textContent = "";
+        // 铺「多行队列」而不是「批次列表」：一行 = 一路 = 一个对话窗口。
+        // 「一次喂几张」只影响**同一路内**第几张起要排队：这一路的第一批是要一起
+        // 交给这个窗口的，所以不标排队；从第二批起标「排队中 · 等 <它前面那一批的同位卡>」。
+        var perBatch = WB.batchMode ? Number.MAX_VALUE : Math.max(1, WB.batchSize || 1);
+        stepsEl.innerHTML = '<div class="wb-lanes">' + WB.lanes.map(function (la, li) {
+          return '<div class="wb-lane" data-wb-lane="' + li + '">' +
+            '<div class="wb-lane-name">' + esc(la.prefix || "") + '</div>' +
+            '<ol class="wb-lane-cards">' + la.cards.map(function (o, i) {
+              var queued = i >= perBatch; // 同路第二批起要等前一批
+              var st = queued ? "wb-step-queued" : "wb-step-pending";
+              var waitNote = queued
+                ? '<span class="wb-step-why">排队中 · 等 ' + esc(la.cards[i - perBatch].id) + '</span>'
+                : "";
+              return '<li class="wb-step ' + st + '" data-wb-step="' + esc(o.id) + '"' +
+                (queued ? ' data-wb-queued="1"' : '') + '>' +
+                '<span class="wb-step-i">' + (i + 1) + '</span>' +
+                '<span class="wb-step-id">' + esc(o.id) + '</span>' +
+                '<span class="wb-step-title">' + esc(o.title) + '</span>' + waitNote + '</li>';
+            }).join("") + '</ol></div>';
+        }).join("") + '</div>';
       } else {
         // 旧模式：服务端给 serial/parallel，串/并行择一
         WB.batches = null;
@@ -1284,20 +1314,19 @@
           analyzedIds.forEach(function (x) { if (WB.dragPool.indexOf(x) === -1) WB.dragPool.push(x); });
         }
       } catch (err) { /* 不影响执行 */ }
-      workbenchLog("分析完成。" + (useBatches ? "卡已按 " + WB.batchSize + " 张/批分组，整批清单将一次性交给 Agent。" : "串行 / 并行两种建议已排好，确认后点「开始执行」。"));
+      workbenchLog("分析完成。" + (useBatches ? "卡已按区域拆成 " + (WB.lanes || []).length + " 条队列（每条一个对话窗口），每条队列一次交给它 " + (WB.batchMode ? "全部卡" : WB.batchSize + " 张") + "。" : "串行 / 并行两种建议已排好，确认后点「开始执行」。"));
       var start = WB.el.querySelector("[data-wb-start]");
       start.disabled = false;
     });
   }
 
-  // 开始执行：按 order 跑。串行一次一件；并行一次放多件（不同区域）。
-  // 分批模式：逐批跑——claim 完整批→一次 ask 携整批清单→release 完整批。
+  // 开始执行：串行一次一件；并行则「一路一个对话窗口、多路同时推进」。
+  // 并行下「一次喂几张」只是同一路内一批的张数，不改变窗口数。
   function workbenchStart() {
     if (!wbPresent() || WB.run) return;
     if (!WB.order.length) { workbenchAnalyze(); return; }
-    // 并行 + 分批粒度 >1（或整批）→ 分批执行（批次列表 + 整批交给 Agent 自主）。
-    // 「每批 1 张 / 不分批」不进这里：走 workbenchPump，cap 由 batchSize 限为 1。
-    if (WB.mode === "parallel" && (WB.batchMode || WB.batchSize > 1)) { workbenchStartBatches(); return; }
+    // 并行（含分批）一律走按路并发的执行器：路数 = 窗口数。
+    if (WB.mode === "parallel") { workbenchStartLanes(); return; }
     WB.run = true;
     WB.stop = false;
     var start = WB.el.querySelector("[data-wb-start]");
@@ -1313,90 +1342,134 @@
     workbenchPump();
   }
 
-  // 分批执行主循环：按顺序逐批推进。一批=claim 所有卡→一次 ask（整批清单）
-  // →让 Agent 自主规划批内怎么处理→release 所有卡。批与批之间串行。
-  function workbenchStartBatches() {
+  // 并行执行主循环（分批 / 不分批共用）。
+  //
+  // ⚠️ 核心语义（2026-11-19 修「选了并行却只有一个窗口」）：
+  //   · 「路」= area 前缀，**一路一个对话窗口**（会话键 = wbConvKey → 「路N · 前缀」）；
+  //   · 路与路**同时推进**，这才叫并行；窗口数 = 路数，不由「一次喂几张」决定；
+  //   · 「一次喂几张」（每批 N 张）= **同一路内**一次 ask 交给 Agent 的卡数。
+  //     同路第二批起必须等前一批回来（它们抢同一块地，本就不能同时做）。
+  //   旧实现把「一次喂几张」错当成「窗口怎么分」，整批塞进一个固定会话键
+  //   （「本批 N 卡」）——于是 4 张卡按每批 2 张分成 2 批时，两批都叫「本批 2 卡」，
+  //   撞进同一个窗口；换任何卡数都只有一个窗口。下面按路分发即修掉这个根因。
+  function workbenchStartLanes() {
     if (!wbPresent() || WB.run) return;
     WB.run = true;
     WB.stop = false;
     WB.inflight = {};
     WB.doneCount = 0;
     WB.execOrder = [];
+    WB.laneCursor = {};
     var start = WB.el.querySelector("[data-wb-start]");
     var stopBtn = WB.el.querySelector("[data-wb-stop]");
     var analyze = WB.el.querySelector("[data-wb-analyze]");
     if (start) start.disabled = true;
     if (stopBtn) stopBtn.disabled = false;
     if (analyze) analyze.disabled = true;
-    workbenchLog("开始分批执行：整批交给 Agent 自主规划。");
-    pumpBatch(0);
+    var nLanes = (WB.lanes || []).length || 1;
+    workbenchLog("开始并行执行：" + nLanes + " 条队列 → " + nLanes + " 个对话窗口同时推进。");
+    // 每条路各起一条独立推进链；它们互不等待。
+    workbenchLaneStep(0);
+    for (var li = 1; li < nLanes; li++) workbenchLaneStep(li);
   }
 
-  // 处理某一批（batchIndex）。claim 全部成功→一次 ask→release→下一批。
-  function pumpBatch(batchIndex) {
+  // 推进某一路（laneIndex）：取该路当前这一批 → claim 全批 → 一次 ask（携整批清单）
+  // → release 全批 → 该路进下一批。**只推进这一条路**，不等别的路。
+  function workbenchLaneStep(laneIndex) {
     if (!WB.run) return;
     if (WB.stop) { workbenchFinish("已停止"); return; }
-    var all = WB.order;
-    var batchCards = all.filter(function (o) { return o.batch === batchIndex; });
-    if (!batchCards.length) {
-      // 没有这个批 = 全跑完
-      if (all.every(function (o) { return o.done; })) workbenchFinish("全部执行完成");
-      else workbenchPumpBatchFallback(batchIndex);
-      return;
-    }
-    // 标记本批 whole 进度
-    var bEl = WB.el.querySelector('[data-wb-batch="' + batchIndex + '"]');
-    var cards = batchCards.slice();
-    var claimDone = 0;
+    var lane = (WB.lanes || [])[laneIndex];
+    if (!lane) { workbenchCheckDone(); return; }
+    var perBatch = Math.max(1, WB.batchSize || 1);
+    if (WB.batchMode) perBatch = lane.cards.length || 1; // 整批全交：一路一次全给
+    var cursor = WB.laneCursor[laneIndex] || 0;
+    var batchCards = lane.cards.slice(cursor, cursor + perBatch);
+    if (!batchCards.length) { workbenchCheckDone(); return; } // 这条路跑完了
+
     var claimed = [];
-    // 逐张 claim（不动用并行，逐批内顺序 claim 保证互斥安全）
-    function claimNext(i) {
+    var stepEls = {};
+    batchCards.forEach(function (o) {
+      o.active = true;
+      WB.inflight[o.id] = o;
+      stepEls[o.id] = findWbStep(o.id);
+    });
+
+    // 逐张 claim（同路内必须都领到才能整批交给 Agent）
+    function claimNext(k) {
       if (!WB.run) return;
-      if (i >= cards.length) { askBatch(batchIndex, cards, claimed); return; }
-      var c = cards[i];
-      var id = c.id;
-      var stepEl = findWbStep(id);
-      claimForWorkbench(id, function (ok, status, why) {
+      if (WB.stop) { workbenchFinish("已停止"); return; }
+      if (k >= batchCards.length) { askLaneBatch(); return; }
+      var o = batchCards[k];
+      claimForWorkbench(o.id, function (ok, status, why) {
         if (!WB.run) return;
         if (!ok) {
-          workbenchMark(stepEl, "wait", "未开工（" + ((why || "").slice(0, 40)) + "）");
-          workbenchLog("「" + id + "」还没就绪（" + (why || status) + "），稍后重试该批。");
-          setTimeout(function () { if (WB.run) pumpBatch(batchIndex); }, 1500);
+          // 领不到（同区域被占 / 别人抢走）：撤回本批已领的，等一会重试这条路。
+          batchCards.forEach(function (x) {
+            x.active = false;
+            delete WB.inflight[x.id];
+          });
+          workbenchMark(stepEls[o.id], "wait", "未开工（" + ((why || "").slice(0, 40)) + "）");
+          if (o.badTries === undefined) o.badTries = 0;
+          o.badTries += 1;
+          var by = WB.by || flowActor();
+          var rel = claimed.slice();
+          (function releaseThen(k2) {
+            if (k2 >= rel.length) {
+              if (o.badTries <= 8) {
+                workbenchLog("路「" + lane.prefix + "」的「" + o.id + "」还没就绪（" + (why || status) + "），稍后重试。");
+                setTimeout(function () { if (WB.run) workbenchLaneStep(laneIndex); }, 1500);
+              } else {
+                // 搁置也要把这些卡从「未完成」里摘出去，否则 WB.run 永远复位不了。
+                workbenchLog("路「" + lane.prefix + "」多次领不到（" + (why || status) + "），先搁置这条路剩下的 " + batchCards.length + " 张。");
+                batchCards.forEach(function (x) {
+                  x.active = false;
+                  x.done = true;
+                  x.skipped = true;
+                  delete WB.inflight[x.id];
+                  workbenchMark(stepEls[x.id], "skip", "搁置：" + ((why || status || "").slice(0, 40)));
+                });
+                WB.doneCount = WB.order.filter(function (o) { return o.done; }).length;
+                WB.laneCursor[laneIndex] = cursor + batchCards.length;
+                workbenchCheckDone();
+              }
+              return;
+            }
+            releaseForWorkbench(rel[k2].id, by, function () { releaseThen(k2 + 1); });
+          })(0);
           return;
         }
-        workbenchMark(stepEl, "asking", "已领·批内处理");
-        claimed.push(c);
-        claimNext(i + 1);
+        claimed.push(o);
+        workbenchMark(stepEls[o.id], "asking", "已领·待交窗口");
+        claimNext(k + 1);
       });
     }
     claimNext(0);
 
-    // 整批 claim 完 → 一次 ask 携带整批清单 → release 全部 → 下一批
-    function askBatch(bi, batchC, claimedC) {
+    // 整批 claim 完 → 一次 ask 携整批清单，会话键 = 这一路（一个窗口）
+    function askLaneBatch() {
       if (!WB.run) return;
-      var listText = batchC.map(function (c) {
-        var id = c.id;
-        return "- " + id + " " + (c.title || "");
+      var listText = batchCards.map(function (c) {
+        return "- " + c.id + " " + (c.title || "");
       }).join("\n");
       var ledgerPath = harnessEnv() ? harnessEnv().dir : "";
-      // 整批清单一次性交给 Agent，让它在批内自主规划顺序 / 是否并发。
       var text =
-        "自动工作台正在执行你负责看板里的一批任务（共 " + batchC.length + " 张卡）。\n" +
-        "这一批是你（看板）划分的「可并行」批：请你拿到整批清单后自主规划——\n" +
-        "   · 决定批内先处理哪张、哪些可以一起推进（如需并行，你能同时处理就同时处理）；\n" +
-        "   · 逐张真的去处理，并把每张在台账 ledger.json 里收口（从 board.config.json 车道 stages 取收口状态，\n" +
-        "     bug→fixed/closed、feature→shipped、risk→resolved/accepted，或至少推进到靠后阶段），让队列能往下走。\n\n" +
+        "自动工作台正在并行推进你负责看板的多条队列之一——本条队列是「" + (lane.prefix || "未分区域") +
+        "」（同一条数据链路/同一块地），共 " + lane.cards.length + " 张卡，本次交给你 " + batchCards.length + " 张。\n" +
+        "你可以自主决定这 " + batchCards.length + " 张的处理顺序（也可以按你的判断同时推进）。\n" +
+        "其它队列由别的窗口同时在做，你**只管这一条队列**，不要去动其它队列的卡。\n\n" +
+        "要求：逐张真的去处理，并在台账 ledger.json 里收口（从 board.config.json 车道 stages 取收口状态，\n" +
+        "bug→fixed/closed、feature→shipped、risk→resolved/accepted，或至少推进到靠后阶段），让队列能往下走。\n\n" +
         "台账文件在：" + (ledgerPath || "（当前看板目录）") + "\\ledger.json\n" +
-        "本批卡片清单：\n" + listText + "\n\n" +
+        "本次交给你的卡片清单：\n" + listText + "\n\n" +
         "这是真实执行，不是分析建议：请实际处理并更新台账，处理完简要回报你动过的每张卡和它现在的状态。";
       var fresh = true, inline = true;
       var finished = false;
-      harnessPostWithCapture("本批 " + batchC.length + " 卡", text, fresh, function (result) {
+      harnessPostWithCapture(wbConvKey(batchCards[0].id) || ("路 · " + (lane.prefix || "")), text, fresh, function (result) {
         if (finished) return;
         if (!result.ok) {
           finished = true;
-          workbenchLog("本批发送失败：" + ((result && result.error) || "未知错误"));
-          finishBatch(bi, batchC, claimedC, { ok: false, error: (result && result.error) || "发送失败" });
+          workbenchLog("路「" + lane.prefix + "」发送失败：" + ((result && result.error) || "未知错误"));
+          finishLaneBatch({ ok: false, error: (result && result.error) || "发送失败" });
           return;
         }
         var askId = result.askId || "";
@@ -1406,64 +1479,50 @@
             if (finished) return;
             finished = true;
             delete WP_ANSWERS[askId];
-            finishBatch(bi, batchC, claimedC, { ok: !payload.error, text: payload.text || "", error: payload.error || "" });
+            finishLaneBatch({ ok: !payload.error, text: payload.text || "", error: payload.error || "" });
           },
         };
         setTimeout(function () {
-          if (!finished) { finished = true; delete WP_ANSWERS[askId]; finishBatch(bi, batchC, claimedC, { ok: false, error: "等 Harness 回答超时" }); }
+          if (!finished) { finished = true; delete WP_ANSWERS[askId]; finishLaneBatch({ ok: false, error: "等 Harness 回答超时" }); }
         }, 300000);
       }, null, inline, "", fresh);
-    }
 
-    // 本批收尾：无论成功/失败，逐张 release；记 done；进度；进下一批。
-    function finishBatch(bi, batchC, claimedC, res) {
-      if (!WB.run) return;
-      var okAsk = res.ok;
-      var verdict = okAsk ? (res.text || "（无文字结论）") : (res.error || "处理未成功");
-      batchC.forEach(function (c, ci) {
-        var stepEl = findWbStep(c.id);
-        var done = ci < claimedC.length; // 是否真的 claim 到了（本批全部 claim 才算 Ask 过）
-        if (okAsk) workbenchMark(stepEl, "done", (verdict.slice(0, 90)));
-        else workbenchMark(stepEl, "wait", (verdict.slice(0, 90)));
-      });
-      workbenchLog("第 " + (bi + 1) + " 批：" + (okAsk ? "Agent 处理完成" : "处理失败——" + verdict.slice(0, 60)));
-      // release 本批已 claim 的
-      var rel = claimedC.slice();
-      function releaseAll(k) {
+      // 本批收尾：逐张 release → 记 done → 该路进下一批（不碰别的路）
+      function finishLaneBatch(res) {
         if (!WB.run) return;
-        if (k >= rel.length) {
-          // 全部 release 完 → 标记本批 done、更新进度、进下一批
-          rel.forEach(function (c) {
-            var id = c.id;
-            var rec = WB.order.filter(function (x) { return x.id === id; })[0];
-            if (rec) { rec.done = true; rec.active = false; }
-            delete WB.inflight[id];
-          });
-          WB.doneCount = WB.order.filter(function (o) { return o.done; }).length;
-          updateWbProgress();
+        var okAsk = res.ok;
+        var verdict = okAsk ? (res.text || "（无文字结论）") : (res.error || "处理未成功");
+        batchCards.forEach(function (c) {
+          workbenchMark(stepEls[c.id], okAsk ? "done" : "wait", verdict.slice(0, 90));
+          c.active = false;
+        });
+        workbenchLog("路「" + lane.prefix + "」第 " + (Math.floor(cursor / perBatch) + 1) + " 批：" +
+          (okAsk ? "窗口处理完成" : "处理失败——" + verdict.slice(0, 60)));
+        var rel = claimed.slice();
+        (function releaseAll(k) {
           if (!WB.run) return;
-          pumpBatch(bi + 1);
-          return;
-        }
-        var c = rel[k];
-        releaseForWorkbench(c.id, WB.by || flowActor(), function () { releaseAll(k + 1); });
+          if (k >= rel.length) {
+            rel.forEach(function (c) {
+              c.done = true;
+              delete WB.inflight[c.id];
+            });
+            WB.doneCount = WB.order.filter(function (o) { return o.done; }).length;
+            updateWbProgress();
+            if (!WB.run) return;
+            WB.laneCursor[laneIndex] = cursor + batchCards.length;
+            setTimeout(function () { if (WB.run) workbenchLaneStep(laneIndex); }, 400);
+            return;
+          }
+          releaseForWorkbench(rel[k].id, WB.by || flowActor(), function () { releaseAll(k + 1); });
+        })(0);
       }
-      releaseAll(0);
     }
   }
 
-  // 批处理兜底（极少发生）：批号断层时按旧 pump 收尾。
-  function workbenchPumpBatchFallback(bi) {
-    var rest = WB.order.filter(function (o) { return !o.done; });
-    if (rest.length) {
-      rest.forEach(function (o) {
-        var stepEl = findWbStep(o.id);
-        workbenchMark(stepEl, "wait", "跳过");
-      });
-      workbenchFinish("有批次未完成");
-    } else {
-      workbenchFinish("全部执行完成");
-    }
+  // 所有路都跑完了 → 收尾。
+  function workbenchCheckDone() {
+    if (!WB.run) return;
+    if (WB.order.every(function (o) { return o.done; })) workbenchFinish("全部执行完成");
   }
 
   // 推进一步 / 若干步。
@@ -1681,6 +1740,17 @@
   // 简化版 harnessPost：直接构造 payload 调 /ops-board/ask，不碰 AI 面板状态。
   function harnessPostWithCapture(itemTitle, text, fresh, done, skillName, inline, reuseSessionId, withContext) {
     var env = harnessEnv();
+    // 没有 __OPS_HARNESS__ 说明这页不是被 Harness 面板加载的（直接开 dist/index.html、
+    // 或 serve.mjs 的裸地址）。此时 /ops-board/ask 根本不存在，env 是 null —— 原来直接读
+    // env.id 会抛 TypeError，界面上表现为「点了开始执行什么都没发生」，连日志都没有。
+    // 这里改成明确报错交回调用方，让工作台把原因写进日志。
+    if (!env) {
+      done({
+        ok: false,
+        error: "当前页面不在 Harness 面板里（没有 __OPS_HARNESS__），工作台无法把卡交给对话窗口。请从 Harness 左侧栏打开这块看板再执行。",
+      });
+      return;
+    }
     var askId = "ask-w-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
     var payload = {
       board: env.id,
@@ -1788,7 +1858,7 @@
         var v = Number(wbBatchSel.value);
         WB.batchSize = v === -1 ? 99999 : (v || 1);
         WB.batchMode = v === -1;
-        workbenchLog("分批已设：" + (v === -1 ? "整批全交（一批全部卡交给一个 Agent 自主处理）" : v === 1 ? "每批 1 张（一张一张来，同时只在跑一张）" : "每批 " + WB.batchSize + " 张，整批交给 Agent 自主规划。"));
+        workbenchLog("分批已设：" + (v === -1 ? "整批全交（一条队列的全部卡一次交给它的窗口）" : v === 1 ? "每批 1 张（每个窗口一次拿一张，同路排队推进）" : "每批 " + WB.batchSize + " 张（每个窗口一次拿这么多，同路分批推进）。"));
       });
     }
   }
