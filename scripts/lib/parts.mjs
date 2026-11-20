@@ -302,13 +302,14 @@ export function itemCard(config, lane, item, { collapsed = false, collapsible = 
     .map((s) => `<section><h4>${esc(s.label)}</h4><p>${esc(s.text)}</p></section>`)
     .join("");
 
-  // 这条卡有没有「文件」类证据 —— 有的话在标题行右侧挂一个「文件」标签。
+  // 这条卡有没有「文件」类证据 —— 有的话在**编号行**右侧挂一个「文件」标签。
   //
-  // 2026-11-20 用户定：「文件标签放在问题标题右侧」。
-  // 原来每一行证据前面都带一个「文件 / 命令 / 提交 …」的小标签，一条卡有 5 条文件证据
-  // 就重复 5 遍「文件」；而人扫卡时想知道的其实是「这条卡有没有落到具体文件上」，
-  // 一次就够了。所以：**标签提到标题行，一行只出现一次**；
-  // 证据列表里 file 那几行不再重复贴标（其余类型留着，见下面的 evList）。
+  // 2026-11-20 用户定，两次修正后的最终位置：「放在 FEAT-901 的右侧，而不是正文的右侧」。
+  // （第一版贴在每条证据前面 → 一条卡 5 条文件证据就重复 5 遍「文件」；
+  //   第二版提到了标题 `<h3>` 那一行 → 用户说那是「正文的右侧」，不对。
+  //   正确位置是**编号那一行**，紧跟 `FEAT-901` 之后。）
+  // 所以：**标签提到编号行，一张卡只出现一次**；证据列表里 file 那几行不再重复贴标
+  // （其余类型留着，见下面的 tagCell）。
   const evItems = item.evidence || [];
   const kindOf = (e) => (typeof e === "string" ? "value" : (e && e.kind) || "value");
   const hasFileEv = evItems.some((e) => kindOf(e) === "file");
@@ -324,7 +325,7 @@ export function itemCard(config, lane, item, { collapsed = false, collapsible = 
       // 其余（实测值、链接、命令）保持纯文本，点了也没处去。
       const look =
         kind === "file" ? evLookFile(text) : kind === "commit" ? evLookCommit(text) : null;
-      // file 类型的标签已经提到标题行，这里不再重复贴一次。
+      // file 类型的标签已经提到编号行，这里不再重复贴一次。
       // 留一个空占位（.ev-kind 用 grid 固定列宽），让有标签和没标签的行左缘对齐。
       const tagCell =
         kind === "file"
@@ -338,9 +339,10 @@ export function itemCard(config, lane, item, { collapsed = false, collapsible = 
     .join("");
 
   const metaBits = [item.area, fmtDate(item.updatedAt)].filter(Boolean).map(esc).join(" · ");
-  // 标题行：标题文字 + 右侧的「文件」标签。用 flex 让标签贴到行尾，
-  // 标题再长也只会自己换行，不会把标签挤下去。
-  const titleRow = `<h3><span class="card-title-text">${esc(item.title)}</span>${fileTag}</h3>`;
+  // 编号行：编号 + 严重度 + 状态，紧跟「文件」标签。
+  // 这个 span 在三种卡片形态里都用（article 的 .card-head / 两种 details 的 summary）。
+  const idLine = `<span class="id">${esc(item.id)} ${severityChip(lane, item)} ${statusChip(lane, item)}${fileTag}</span>`;
+  const titleRow = `<h3><span class="card-title-text">${esc(item.title)}</span></h3>`;
 
   const cardBody = `<div class="sections">${sections}</div>
   ${ev ? `<div class="evidence"><b>证据</b><ul>${ev}</ul></div>` : ""}
@@ -354,7 +356,7 @@ export function itemCard(config, lane, item, { collapsed = false, collapsible = 
   if (collapsed) {
     return `<details class="card card-collapsed lv-${tone}" id="${esc(item.id)}">
   <summary>
-    <span class="id">${esc(item.id)} ${severityChip(lane, item)} ${statusChip(lane, item)}</span>
+    ${idLine}
     <span class="meta">${metaBits}</span>
     ${titleRow}
   </summary>
@@ -370,7 +372,7 @@ export function itemCard(config, lane, item, { collapsed = false, collapsible = 
   if (collapsible) {
     return `<details class="card card-open lv-${tone}" id="${esc(item.id)}" open>
   <summary>
-    <span class="id">${esc(item.id)} ${severityChip(lane, item)} ${statusChip(lane, item)}</span>
+    ${idLine}
     <span class="meta">${metaBits}</span>
     ${titleRow}
   </summary>
@@ -380,7 +382,7 @@ export function itemCard(config, lane, item, { collapsed = false, collapsible = 
 
   return `<article class="card lv-${tone}" id="${esc(item.id)}">
   <div class="card-head">
-    <span class="id">${esc(item.id)} ${severityChip(lane, item)} ${statusChip(lane, item)}</span>
+    ${idLine}
     <span class="meta">${metaBits}</span>
   </div>
   ${titleRow}

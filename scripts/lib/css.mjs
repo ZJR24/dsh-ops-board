@@ -392,15 +392,18 @@ tbody tr:hover{background:var(--surface)}
 .card-collapsed>summary h3{font-size:15px;margin:4px 0 0;clear:none}
 /* 车道页默认展开：标题仍是卡片标题的尺寸，收起后就是一行条目 */
 .card-open>summary h3{font-size:19px;line-height:1.35;margin:6px 0 0;clear:none}
-/* 标题行（2026-11-20）：标题文字 + 右侧「文件」标签。
-   flex 布局让标签贴行尾、标题自己换行；标签 flex:none 保证不被挤变形。
-   ⚠️ 三处 h3（article / card-collapsed / card-open）都走这一套，
-   所以这里用 .card h3 统一，不各自重复。 */
+/* 标题行（2026-11-20）。「文件」标签**不在这一行** —— 它在编号那一行
+   （见下面的 .card-file-tag）。这里只留标题文字，flex 是为了保持和
+   原来的行盒行为一致（不因为去掉标签就改变标题的换行/对齐）。 */
 .card h3{display:flex;align-items:baseline;gap:8px}
 .card h3 .card-title-text{flex:1 1 auto;min-width:0}
-.card-file-tag{flex:none;font-family:var(--sans);font-size:9px;line-height:1;padding:2px 6px;border:1px solid var(--rule2);border-radius:3px;color:var(--muted);letter-spacing:.02em;white-space:nowrap;align-self:center}
-/* 收起状态（只露一行）时标签也要在，样式略小一点，不抢标题 */
-.card-collapsed>summary .card-file-tag{font-size:8.5px;padding:1px 5px}
+/* 「文件」标签：贴在**编号行**右侧（FEAT-901 高 待处理 [文件] 这样）。
+   编号行是 inline 流（.id 是 inline），标签跟着它后面走、不换行。
+   竖排对齐（vertical-align:middle）让方框和编号那行文字居中，
+   而不是坐在基线上显得偏高。 */
+.card-file-tag{display:inline-block;vertical-align:middle;margin-left:6px;font-family:var(--sans);font-size:9px;line-height:1;padding:1px 5px;border:1px solid var(--rule2);border-radius:3px;color:var(--muted);letter-spacing:.02em;white-space:nowrap}
+/* 收起状态（只露一行）时标签也要在，样式略小一点，不抢编号 */
+.card-collapsed>summary .card-file-tag{font-size:8.5px;padding:1px 4px;margin-left:5px}
 .card-collapsed>.sections,.card-collapsed>.evidence,.card-collapsed>.card-acts{padding:0 16px 15px}
 .card-open>.sections,.card-open>.evidence,.card-open>.card-acts{padding:0 16px 15px}
 .card-collapsed>summary::after,.card-open>summary::after{content:"";position:absolute;right:12px;top:50%;transform:translateY(-50%);font-family:var(--sans);font-size:10px;line-height:1;color:var(--muted);pointer-events:none}
