@@ -420,7 +420,14 @@ tbody tr:hover{background:var(--surface)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 
 /* 清单与时间线 */
-.timeline{list-style:none;margin:0;padding:0 0 0 20px;border-left:2px solid var(--rule2)}
+/* 时间线与上面的筛选条之间要留一口气（2026-11-20 用户报：
+   「处理记录，标签和最后一条记录之间的间隔有点小」）。
+   实测原来是 **0px** —— 筛选条（.legend-line）只有 padding-top:8px 是它自己的上边距，
+   底部到 .timeline 一点空隙都没有，第一条记录的日期直接贴着「类型：」那一排。
+   margin-top:10px 把两者分开；.history-kinds 补一点 padding-bottom，
+   让它看起来是一块完整的工具条，而不是焊在正文上。 */
+.timeline{list-style:none;margin:10px 0 0;padding:0 0 0 20px;border-left:2px solid var(--rule2)}
+.history-kinds{padding-bottom:2px}
 .timeline li{position:relative;padding:0 0 10px 9px;font-size:calc(12.2px * var(--fs-scale));line-height:1.7}
 .timeline li::before{content:"";position:absolute;left:-26px;top:7px;width:8px;height:8px;border-radius:50%;background:var(--paper);border:2px solid var(--rule2)}
 .timeline li.tl-found::before{border-color:var(--red)}
