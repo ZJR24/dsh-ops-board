@@ -173,21 +173,37 @@ const laneViews = await ev(`(() => {
 
 check("找到三个车道页", (laneViews || []).length === 3, (laneViews || []).map((v) => v.view).join(", "));
 
-for (const v of laneViews || []) {
+// 车道页会随台账真实收口而变空（cyber 的问题/需求两页就曾经全空）。
+// 空页上没有卡可验「能不能收」—— 那是数据变了，不是折叠坏了。
+// 判据改成：**至少有一个车道页有卡**，然后只要有卡就逐项断言。
+// 全空才是真问题（说明卡片渲染整体没了）。
+const lanesWithCards = (laneViews || []).filter((v) => v.cards > 0);
+check(
+  "至少一个车道页有卡可验（全部为空才说明渲染坏了）",
+  lanesWithCards.length > 0,
+  (laneViews || []).map((v) => v.view + "=" + v.cards).join(", ")
+);
+
+for (const v of lanesWithCards) {
   check(
     `${v.title}页卡片都能收起`,
-    v.cards > 0 && v.details === v.cards,
+    v.details === v.cards,
     `${v.cards} 张卡，其中可收起 ${v.details} 张`
   );
   check(
     `${v.title}页卡片默认展开`,
-    v.cards > 0 && v.open === v.cards,
+    v.open === v.cards,
     `${v.open}/${v.cards} 默认展开`
   );
 }
+for (const v of (laneViews || []).filter((x) => x.cards === 0)) {
+  check(`${v.title}页没有卡（已全部收口），跳过折叠断言`, true, "0 张卡");
+}
 
 // ③ 真的点一下要能收起来；再点一下要能展开
-await send("Page.navigate", { url: pageUrl("#view-lane-bug") });
+// 用**第一个真的有卡**的车道页，不写死 bug 页 —— 那一页可能刚好全收口了。
+const foldView = (lanesWithCards[0] || {}).view || "lane-bug";
+await send("Page.navigate", { url: pageUrl("#view-" + foldView) });
 await sleep(1500);
 
 const folded = await ev(`(() => {
@@ -212,7 +228,7 @@ check("再点一下能展开回去", !!folded && folded.reopened, folded ? `高�
 
 // ④ 从表格点条目标题跳过来时，被收起的卡片要自动展开
 //    否则跳过去只看到一行，看不到正文 —— 等于跳了个寂寞。
-await send("Page.navigate", { url: pageUrl("#view-lane-bug") });
+await send("Page.navigate", { url: pageUrl("#view-" + foldView) });
 await sleep(1500);
 
 const jump = await ev(`(() => {

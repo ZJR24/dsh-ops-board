@@ -40,7 +40,15 @@ export function extractPlanJson(text) {
  * 这个值必须和 client.js 里的 WB_PLANNER_KEY 保持一致。
  */
 export const PLANNER_WINDOW_KEY = "调度台";
-const RESERVED_KEYS = new Set([PLANNER_WINDOW_KEY]);
+
+/**
+ * 串行执行时那张固定窗口的名字。并行才按「路」分窗口；串行没有路可分，
+ * 但也不该每张卡新开一个会话 —— 所有卡都交给这一个窗口接着做。
+ * 它同样是**保留名**：lane.key 起这个名字，会让并行干活窗口接进串行那条会话。
+ * 这个值必须和 client.js 里的 WB_EXEC_KEY 保持一致。
+ */
+export const EXEC_WINDOW_KEY = "执行台";
+const RESERVED_KEYS = new Set([PLANNER_WINDOW_KEY, EXEC_WINDOW_KEY]);
 
 function planTryParse(s) {
   try {

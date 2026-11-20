@@ -155,7 +155,7 @@ async function analyzeThenStart(ev, mode) {
 }
 
 // ============ Phase 1：串行 ============
-console.log("[1] 串行：从备选里排 3 张，验证逐件完成且顺序服从建议");
+console.log("[1] 串行：从备选里排若干张（最多 3 张），验证逐件完成且顺序服从建议");
 (async () => {
   const h = await launchPhase("serial", 8797);
   await h.inject();
@@ -165,7 +165,9 @@ console.log("[1] 串行：从备选里排 3 张，验证逐件完成且顺序服
   const stepsDone = await h.ev(`document.querySelectorAll('[data-wb-steps] .wb-step-done').length`);
   const domOrder = (await h.ev(`Array.prototype.map.call(document.querySelectorAll('[data-wb-steps] .wb-step-id'),function(s){return s.textContent;})`)) || [];
   console.log("\n[串行] 完成：" + stepsDone + " · 顺序=" + domOrder.join(","));
-  ok(planned.length === picked.length && picked.length === 3, "排进去的 3 张都进了执行计划", "排队 " + picked.join(",") + " · 计划 " + planned.join(","));
+  // 排进去几张就断言几张：以前写死 3，台账被真实收口收到只剩 1 张未收口时
+  // 这条必然失败 —— 那是数据变了，不是执行引擎坏了。
+  ok(planned.length === picked.length && picked.length > 0, "排进去的卡都进了执行计划", "排队 " + picked.join(",") + " · 计划 " + planned.join(","));
   ok(stepsDone === planned.length && stepsDone > 0, "串行全部完成（逐件推进）", "完成 " + stepsDone + "/" + planned.length);
   ok(domOrder.length === planned.length && domOrder.every((v, i) => v === planned[i]), "DOM 顺序 = 分析给出的串行建议", domOrder.join(","));
   const claimsLeft = await fetch(h.B + "/api/flow/plan").then((r) => r.json()).then((j) => (j.runnable || []).filter((x) => x.state === "running").length);

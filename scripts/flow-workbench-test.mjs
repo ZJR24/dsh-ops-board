@@ -10,18 +10,60 @@ import { tmpdir } from "node:os";
 
 const EDGE = "C:/Program Files (x86)/Microsoft/EdgeCore/141.0.3537.99/msedge.exe";
 const PORT = 8799;
-const BOARD = "D:\\WorkSpace-Tools\\ops-board-reports\\cyber-egg-basket";
 const B = `http://127.0.0.1:${PORT}`;
 const CLAIMS_DIR = mkdtempSync(join(tmpdir(), "wb-test-claims-"));
 const CLAIMS = join(CLAIMS_DIR, "flow-claims.json");
 
-const srv = spawn("node", [
-  "scripts/serve.mjs", "--board", BOARD, "--port", String(PORT), "--claims", CLAIMS,
-], { cwd: "D:\\WorkSpace-Tools\\ops-board", stdio: ["ignore", "pipe", "pipe"] });
-let stderr = "";
-srv.stderr.on("data", (d) => (stderr += d));
+// 用哪块看板：显式 --board 优先，否则在候选里挑第一块**还没做完**的。
+// 为什么不再写死一块（2026-11-20）：这个测试需要「至少 2 张未收口的卡」才有意义。
+// 写死 cyber-egg-basket 时，它的卡被真实收口收完之后 total 掉到 1，
+// 整个测试就卡在启动守卫上（不是代码坏了，是数据变了）。候选轮询让这条
+// 断言重新对齐真实数据，同时保留「确实没卡就明说」的失败语义。
+const BOARD_CANDIDATES = [
+  process.argv.includes("--board") ? process.argv[process.argv.indexOf("--board") + 1] : "",
+  "D:\\WorkSpace-Tools\\ops-board-reports\\cyber-egg-basket",
+  "D:\\WorkSpace-Tools\\ops-board-reports\\practise",
+].filter((v, i, a) => v && a.indexOf(v) === i && existsSync(join(v, "ledger.json")));
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+let BOARD = "";
+let srv = null;
+let PLAN = null;
+let stderr = "";
+for (const candidate of BOARD_CANDIDATES) {
+  const child = spawn("node", [
+    "scripts/serve.mjs", "--board", candidate, "--port", String(PORT), "--claims", CLAIMS,
+  ], { cwd: "D:\\WorkSpace-Tools\\ops-board", stdio: ["ignore", "pipe", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (d) => (err += d));
+  let ready = false;
+  for (let i = 0; i < 40; i++) {
+    await wait(250);
+    try { if ((await fetch(B + "/api/ping")).ok) { ready = true; break; } } catch {}
+  }
+  let plan = null;
+  if (ready) {
+    try { plan = await fetch(B + "/api/flow/plan").then((r) => r.json()); } catch {}
+  }
+  child.kill();
+  await wait(600);
+  if (plan && plan.ok && (plan.total || 0) >= 2) { BOARD = candidate; srv = null; PLAN = plan; break; }
+  stderr += err;
+}
+if (!BOARD) {
+  console.error("候选看板的可排卡都不足（需要 total>=2）：" + BOARD_CANDIDATES.join(" / "));
+  rmSync(CLAIMS_DIR, { recursive: true, force: true });
+  process.exit(1);
+}
+console.log("看板：" + BOARD + "（total=" + PLAN.total + " / queued=" + (PLAN.queued || 0) + "）");
+
+// 选中的看板重新起一份服务，整轮测试都用它。
+srv = spawn("node", [
+  "scripts/serve.mjs", "--board", BOARD, "--port", String(PORT), "--claims", CLAIMS,
+], { cwd: "D:\\WorkSpace-Tools\\ops-board", stdio: ["ignore", "pipe", "pipe"] });
+stderr = "";
+srv.stderr.on("data", (d) => (stderr += d));
 let up = false;
 for (let i = 0; i < 40; i++) {
   await wait(250);
@@ -31,7 +73,7 @@ if (!up) { console.error("服务没起来\n" + stderr); srv.kill(); process.exit
 
 // 从看板实时读取「在执行队列里应有多少张可排的卡」，测试不再写死 7：
 // 看板数据会随真实收口而变化，写死数字会让测试在数据变化后误报。
-const PLAN = await fetch(B + "/api/flow/plan").then((r) => r.json());
+PLAN = await fetch(B + "/api/flow/plan").then((r) => r.json());
 const EXPECT = (PLAN && PLAN.total) || 0;            // 队列应含的全部卡数（ready + waiting）
 const EXPECT_QUEUED = (PLAN && PLAN.queued) || 0;    // 其中「排队等」的卡数
 if (EXPECT < 2) { console.error("看板可排卡不足（total=" + EXPECT + "），无法跑工作台测试"); srv.kill(); process.exit(1); }
@@ -679,12 +721,23 @@ while (Date.now() < qdl) {
 }
 const qAfterRun = JSON.parse(await ev(`JSON.stringify({
   queued: document.querySelectorAll('[data-wb-steps] .wb-step-queued').length,
-  queuedAttr: document.querySelectorAll('[data-wb-steps] [data-wb-queued]').length
+  queuedAttr: document.querySelectorAll('[data-wb-steps] [data-wb-queued]').length,
+  // 这次跑的是「路内串行」：账面状态没被真收口（答案是假的），所以同区域后一张
+  // 永远领不到、会被搁置 —— 那些卡**确实没开跑**，保留排队标记是对的。
+  // 这里要验的是另一件事：**真跑过的卡**不许还挂着「等 X」。
+  ranStillQueued: window.__wb.order.filter(function(o){ return o.done; }).filter(function(o){
+    return !!document.querySelector('[data-wb-steps] [data-wb-step="' + o.id + '"].wb-step-queued');
+  }).map(function(o){ return o.id; }),
+  doneN: window.__wb.order.filter(function(o){ return o.done; }).length
 })`));
 ok(qBeforeRun >= 1, "开跑前确实有排队卡（否则这条验不到）", qBeforeRun + " 张");
 ok(maxQueuedDuringRun <= qBeforeRun, "执行过程中排队标记只会减少，不会新增", "峰值 " + maxQueuedDuringRun);
-ok(qAfterRun.queued === 0 && qAfterRun.queuedAttr === 0,
-  "跑完后排队标记和 data-wb-queued 都清干净（不会挂着「等 X」自相矛盾）",
+ok(qAfterRun.doneN >= 1 && qAfterRun.ranStillQueued.length === 0,
+  "跑过的卡不再挂「排队中」（不会出现「已处理完 · 还在等 X」自相矛盾）",
+  "跑完 " + qAfterRun.doneN + " 张 · 仍挂标记 " + qAfterRun.ranStillQueued.length + " 张" +
+  (qAfterRun.ranStillQueued.length ? "：" + qAfterRun.ranStillQueued.join(",") : ""));
+ok(qAfterRun.queued === qAfterRun.queuedAttr,
+  "排队标记与 data-wb-queued 属性始终一致（不会只清一半）",
   "标记 " + qAfterRun.queued + " / 属性 " + qAfterRun.queuedAttr);
 
 console.log("\n[5k] 不在 Harness 面板里（没有 __OPS_HARNESS__）时，点开始必须给出可读原因，不能静默失败");
@@ -820,6 +873,142 @@ if (convKeyStable && convKeyStable.a1 && convKeyStable.a1 !== "(no export)") {
     convKeyStable.a1 + " == " + convKeyStable.a2);
 } else {
   ok(true, "会话键未导出到 window，跳过（由渲染产物行为覆盖）");
+}
+
+console.log("\n[5o] 正在处理中的卡留在「待执行队列」里，不该掉回备选");
+// 用户报：「正在处理的任务，没有再处理队列里，还在备选里」。
+// 根因是 workbenchRefresh 合并候选池时把 state==='running' 的卡过滤掉了，
+// 于是别人一领走，这张卡就从队列里消失、又被备选那半边收进去。
+// 这里模拟「别人先领走一张」：直接打 /api/flow/claim，再让页面自己刷新一次。
+{
+  const claimTarget = (PLAN.runnable || []).filter((r) => r.state === "ready")[0];
+  if (!claimTarget) {
+    ok(true, "[跳过] 当前没有可开工的卡，无法模拟「被领走」");
+  } else {
+    await ev(`document.querySelector('[data-wb-clear]').click(); 1`);
+    await wait(400);
+    const claimed = await fetch(B + "/api/flow/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: claimTarget.id, by: "测试占用者" }),
+    }).then((r) => r.json());
+    ok(claimed.ok === true, "模拟别人领走一张卡（" + claimTarget.id + "）", JSON.stringify(claimed).slice(0, 80));
+    await ev(`window.__wbRefresh ? window.__wbRefresh() : 0; 1`);
+    await wait(1200);
+    const runStat = JSON.parse(await ev(`JSON.stringify((function(){
+      var groups = document.querySelectorAll('[data-wb-pool] .wb-group');
+      var q = groups[0] ? groups[0] : null;
+      var id = ${JSON.stringify(claimTarget.id)};
+      var inQueue = q ? Array.prototype.slice.call(q.querySelectorAll('.wb-pick')).some(function(c){ return c.getAttribute('data-wb-id') === id; }) : false;
+      var inStandby = Array.prototype.slice.call(document.querySelectorAll('[data-wb-pool] .wb-pick.wb-standby')).some(function(c){ return c.getAttribute('data-wb-id') === id; });
+      var occupied = Array.prototype.slice.call(document.querySelectorAll('[data-wb-pool] .wb-pick.wb-occupied')).map(function(c){ return c.getAttribute('data-wb-id'); });
+      var tag = q ? (q.querySelector('.wb-state-tag') || {}).textContent : '';
+      return { id: id, inQueue: inQueue, inStandby: inStandby, occupied: occupied, tag: tag || '', inPool: window.__wb.dragPool.indexOf(id) };
+    })())`));
+    ok(runStat.inQueue === true && runStat.inPool > -1,
+      "正在处理的卡在「待执行队列」里（不是只在备选）", "inQueue=" + runStat.inQueue + " inPool=" + runStat.inPool);
+    ok(runStat.inStandby === false, "正在处理的卡不再出现在备选区", "inStandby=" + runStat.inStandby);
+    ok(runStat.tag === "处理中", "队列里这张卡标「处理中」，看得出在谁手上", "tag=" + runStat.tag);
+    const stillDraggable = await ev(`Array.prototype.slice.call(document.querySelectorAll('[data-wb-pool] .wb-group:first-child .wb-pick')).some(function(c){ return c.getAttribute('data-wb-id') === ${JSON.stringify(claimTarget.id)} && c.getAttribute('draggable') === 'true'; })`);
+    ok(stillDraggable === false, "处理中的卡不可拖动排序（已经交出去了，不能改它的次序）");
+    await fetch(B + "/api/flow/release", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: claimTarget.id, by: "测试占用者" }),
+    });
+    await ev(`window.__wbRefresh ? window.__wbRefresh() : 0; 1`);
+    await wait(800);
+  }
+}
+
+console.log("\n[5p] 串行：所有卡交给**同一个**固定窗口「执行台」并复用（不是每张新开一个）");
+// 用户问：「除了调度台，其他对话会复用吗，我希望是可以的」。
+// 串行以前 fresh=true + 会话键回落成卡 id → N 张卡开 N 个窗口，一个都不复用。
+// 现在：会话键固定「执行台」、fresh=false → N 张卡进同一条会话。
+{
+  const serialIds = await ev(`(window.__wb.candidate || []).filter(function(c){ return c.state === 'ready'; }).map(function(c){ return c.id; }).slice(0,2)`);
+  if (!serialIds || serialIds.length < 1) {
+    ok(true, "[跳过] 没有可开工的卡，无法验证串行复用");
+  } else {
+    await ev(`document.querySelector('[data-wb-clear]').click(); 1`);
+    await wait(400);
+    // 前面几节跑过真实执行，可能留下 inflight / run 标记；不先归位的话
+    // workbenchStart 会因为 WB.run 还是 true 而直接 return，一枪不放。
+    await ev(`window.__wb.run = false; window.__wb.stop = false; window.__wb.inflight = {}; window.__wb.doneCount = 0; 1`);
+    await wait(200);
+    await ev(`window.__OPS_HARNESS__ = window.__OPS_HARNESS__ || { id: 'test-board', dir: 'D:\\\\x', label: 't' };
+      window.__wbReuse = { asked: [] };
+      var orig = window.fetch.bind(window);
+      window.fetch = function(url, opts){
+        if (String(url).indexOf('/ops-board/ask') === 0 && opts && opts.method === 'POST'){
+          var body = JSON.parse(opts.body);
+          window.__wbReuse.asked.push({ askId: body.askId, item: body.item, title: body.title, sessionTitle: body.sessionTitle || '', fresh: body.fresh });
+          return Promise.resolve({ok:true, json:function(){return Promise.resolve({ok:true, askId:body.askId});}});
+        }
+        return orig(url, opts);
+      }; 1`);
+    await ev(`document.querySelector('input[name=wb-mode][value=serial]').checked=true; document.querySelector('input[name=wb-mode][value=serial]').dispatchEvent(new Event('change',{bubbles:true})); 1`);
+    await wait(300);
+    await ev(`window.__wb.dragPool = ${JSON.stringify(serialIds)}; 1`);
+    await ev(`document.querySelector('[data-wb-analyze]').dispatchEvent(new MouseEvent('click',{bubbles:true})); 1`);
+    // 等分析结果落地（串行分支要等一次 /api/workbench/analyze 往返）
+    for (let i = 0; i < 20; i++) {
+      await wait(250);
+      if (await ev(`(window.__wb.order || []).length > 0`)) break;
+    }
+    const lanesCleared = await ev(`(window.__wb.lanes || []).length`);
+    ok(lanesCleared === 0, "串行分析后不残留上一轮的「路」（否则会话键会错接到并行窗口）", "lanes=" + lanesCleared);
+    const preRunState = JSON.parse(await ev(`JSON.stringify({ order: (window.__wb.order||[]).length, mode: window.__wb.mode, run: window.__wb.run })`));
+    await ev(`document.querySelector('[data-wb-start]').dispatchEvent(new MouseEvent('click',{bubbles:true})); 1`);
+    await wait(600);
+    const startedRun = await ev(`window.__wb.run`);
+    let reuseSeen = 0;
+    const reuseDl = Date.now() + 20000;
+    while (Date.now() < reuseDl) {
+      await wait(400);
+      const n = await ev(`(function(){var a=window.__wbReuse.asked;var c=0;a.slice(${reuseSeen}).forEach(function(x){window.postMessage({type:'ops-board/answer',askId:x.askId,ok:true,text:'已处理收口',by:'t'},'*');c++;});return c;})()`);
+      reuseSeen += n;
+      if (await ev(`window.__wb.run === false`)) break;
+    }
+    const reuseSum = JSON.parse(await ev(`JSON.stringify({
+      asked: window.__wbReuse.asked,
+      doneN: window.__wb.order.filter(function(o){return o.done;}).length,
+      totalN: window.__wb.order.length
+    })`));
+    ok(startedRun === true,
+      "串行点了「开始执行」就真的跑起来了（WB.run=true，不被上一节的残留状态挡住）",
+      "run=" + startedRun + " · 开跑前 " + JSON.stringify(preRunState));
+    ok(reuseSum.asked.length >= 1, "串行确实发出了 ask", reuseSum.asked.length + " 次");
+    const keys = reuseSum.asked.map((a) => a.item);
+    const distinct = keys.filter((v, i) => keys.indexOf(v) === i);
+    ok(distinct.length === 1 && distinct[0] === "执行台",
+      "所有卡共用一个会话键「执行台」（窗口复用）", "键=" + distinct.join(",") + " / " + reuseSum.asked.length + " 次");
+    ok(reuseSum.asked.every((a) => a.fresh === false),
+      "每次都是 fresh:false（接回同一条会话，不是新建）", reuseSum.asked.map((a) => a.fresh).join(","));
+    ok(reuseSum.asked.every((a) => a.sessionTitle === "执行台"),
+      "会话名只写窗口名「执行台」，不带第二段重复", reuseSum.asked.map((a) => a.sessionTitle).join(","));
+    const dupTitle = reuseSum.asked.filter((a) => a.title && a.title === a.item);
+    ok(dupTitle.length === 0,
+      "title 不再等于 item（旧宿主拼 `${item} · ${title}` 时就不会出现「名称 · 名称」）",
+      reuseSum.asked.map((a) => a.item + "|" + a.title).join(" , "));
+  }
+}
+
+console.log("\n[5q] 「执行台」是保留名：lane.key 起这个名字会被判非法、整份回退");
+{
+  const execReserved = await ev(`(function(){
+    var P = window.__WB_PLANNER__;
+    if (!P) return 'no-planner';
+    var pm = {get:function(){return '数据源';},has:function(){return true;}};
+    var plan = {lanes:[{key:'执行台',cardIds:['A']}]};
+    return P.resolvePlan(JSON.stringify(plan), ['A'], pm).source;
+  })()`);
+  ok(execReserved === "fallback",
+    "lane.key 占用串行固定窗口「执行台」→ 回退（不会让并行窗口接进串行会话）", String(execReserved));
+  const execName = await ev(`window.__WB_PLANNER__ ? (window.__WB_PLANNER__.EXEC_WINDOW_KEY || null) : null`);
+  ok(execName === "执行台", "串行固定窗口名已导出（供 client.js 对齐）", String(execName));
+  const plannerStill = await ev(`window.__WB_PLANNER__ ? window.__WB_PLANNER__.PLANNER_WINDOW_KEY : null`);
+  ok(plannerStill === "调度台", "分析窗口的名字没被改动", String(plannerStill));
 }
 
 console.log("\n[6] 服务没崩");

@@ -927,6 +927,9 @@
   };
   // 暴露给测试/扩展：只读探针，不会在正常页面干扰任何东西。
   try { window.__wb = WB; } catch (e) {}
+  // 刷新候选池 / 重画池子的两个探针。平时没有任何代码读它们，只有测试用
+  // （要复现「别人先领走了这张卡」这种状态，必须能自己触发一次刷新）。
+  try { window.__wbRefresh = workbenchRefresh; window.__wbRenderPool = renderWorkbenchPool; } catch (e) {}
 
   function wbPresent() { return !!WB.el; }
 
@@ -956,12 +959,18 @@
       var firstRun = !WB.seedOnce;
       WB.seedOnce = true;
       if (firstRun) {
-        WB.dragPool = [];
+        // 一进页面执行队列为空（卡都由用户自己挑）——**正在处理中的卡例外**：
+        // 它已经在跑了，本来就属于「待执行队列里的活」，不该躺在备选区当候选。
+        WB.dragPool = cand.filter(function (c) { return c.state === "running"; })
+          .map(function (c) { return c.id; });
       } else {
         // 保留用户已排的顺序与移出状态，仅合并新出现的卡
         var known = WB.dragPool.slice();
-        var kept = known.filter(function (id) { return cand.some(function (c) { return c.id === id && c.state !== "running"; }); });
-        cand.filter(function (c) { return c.state !== "running" && kept.indexOf(c.id) === -1; })
+        // running 的卡**必须留在队列里**：以前这里写成 `c.state !== "running"`，
+        // 于是别人一领走（或上一轮还在跑），这张卡就被踢出队列、掉回备选区，
+        // 界面上表现为「正在处理的任务不在处理队列里，还在备选里」。
+        var kept = known.filter(function (id) { return cand.some(function (c) { return c.id === id; }); });
+        cand.filter(function (c) { return kept.indexOf(c.id) === -1; })
           .forEach(function (c) { kept.push(c.id); });
         WB.dragPool = kept;
       }
@@ -1016,6 +1025,20 @@
       var label = esc(c.title);
       if (c.state === "wait") label += ' <span class="wb-queued">· 等 ' + esc(c.waitsFor) + "</span>";
       else if (c.state === "running") label += ' <span class="wb-occupied">· ' + esc(c.by) + " 正在做</span>";
+      // 正在处理的卡留在队列里，但它已经交出去了：不能拖、不能 ✕、点本体也不撤回。
+      // 只作为「这件在谁手上」的占位，免得进度看着像凭空消失。
+      if (c.state === "running") {
+        return (
+          '<div class="wb-pick wb-occupied" data-wb-id="' + esc(c.id) + '" title="' +
+          esc((c.by || "他人") + " 正在处理，处理完自动回到备选") + '">' +
+          '<span class="wb-pick-row">' +
+          '<span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
+          '<span class="wb-pick-title">' + label + "</span>" +
+          '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+          '<span class="wb-state-tag">处理中</span></span>' +
+          "</div>"
+        );
+      }
       return (
         '<div class="wb-pick" draggable="true" data-wb-id="' + esc(c.id) + '">' +
         '<span class="wb-pick-row"><span class="wb-pick-grip" title="拖动排序">⠿</span>' +
@@ -1026,21 +1049,12 @@
         "</div>"
       );
     }).join("");
-    // 备选 = 没进队列、且未在执行（可点加入）；正在执行的 running 也放进备选区展示
-    // （带「某某 正在做」，不可点加入，仅作占用提示）。
+    // 备选 = 没进队列、且**没在处理中**的卡（可点加入）。
+    // 以前这里写成 `c.state === "running" || 不在队列`，于是正在处理的卡被硬塞进备选区，
+    // 界面上就成了「正在处理的任务不在处理队列里，还在备选里」。
     var standby = WB.candidate.filter(function (c) {
-      return c.state === "running" || WB.dragPool.indexOf(c.id) === -1;
+      return c.state !== "running" && WB.dragPool.indexOf(c.id) === -1;
     }).map(function (c) {
-      if (c.state === "running") {
-        return (
-          '<div class="wb-pick wb-standby wb-occupied" data-wb-id="' + esc(c.id) + '" title="已被人领走正在处理，暂不能加入队列；处理完会自动回到可选的备选卡">' +
-          '<span class="wb-pick-row"><span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
-          '<span class="wb-pick-title">' + esc(c.title) + "</span>" +
-          '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
-          '<span class="wb-state-tag">处理中（' + esc(c.by || "他人") + " 在用）</span></span>" +
-          "</div>"
-        );
-      }
       return (
         '<div class="wb-pick wb-standby" data-wb-id="' + esc(c.id) + '" data-wb-add="' + esc(c.id) + '" title="点一下加入队列">' +
         '<span class="wb-pick-row"><span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
@@ -1094,14 +1108,19 @@
         workbenchRefreshModeBtn();
       });
     });
-    // 全部加入：把备选里所有卡一次收进队列
+    // 全部加入：把备选里所有卡一次收进队列。
+    // 正在处理中的卡本来就该在队列里（refresh 会保住），这里不能把它们再过滤掉。
     var addAll = pool.querySelector("[data-wb-addall]");
     if (addAll) {
       addAll.addEventListener("click", function () {
-        WB.dragPool.length = 0;
-        WB.dragPool = WB.candidate
-          .filter(function (c) { return c.state !== "running"; })
+        var kept = WB.candidate
+          .filter(function (c) { return c.state === "running"; })
           .map(function (c) { return c.id; });
+        WB.dragPool = kept.concat(
+          WB.candidate
+            .filter(function (c) { return c.state !== "running" && kept.indexOf(c.id) === -1; })
+            .map(function (c) { return c.id; })
+        );
         renderWorkbenchPool(pool);
         workbenchRefreshModeBtn();
       });
@@ -1293,6 +1312,13 @@
   // 分析窗口的会话键。**必须与 planner.mjs 的 PLANNER_WINDOW_KEY 一致** ——
   // 校验器用它拒绝「lane.key 撞上分析窗口」的计划（撞了会让干活窗口接进分析窗口的会话）。
   var WB_PLANNER_KEY = (wbPlanner() && wbPlanner().PLANNER_WINDOW_KEY) || "调度台";
+  // 串行执行的固定窗口名。串行没有「路」可分，但也不该每张卡新开一个窗口 ——
+  // 用户要的是「一个固定窗口，所有卡都交给它」：N 张卡 → 1 条会话，接着上下文做。
+  // 名字同时充当**复用键**（宿主按它查映射表）和**显示名**，两处必须是同一个字符串，
+  // 否则映射表会随会话漂移、窗口越开越多。
+  // 它和分析窗口一样是保留名：planner.mjs 的 RESERVED_KEYS 里也列了「执行台」，
+  // 免得 AI 把某条 lane 也起名叫「执行台」，让干活窗口接进这条串行会话。
+  var WB_EXEC_KEY = (wbPlanner() && wbPlanner().EXEC_WINDOW_KEY) || "执行台";
   function wbAskPlanner(cards, batchSize, reuse, done) {
     var P = wbPlanner();
     if (!P) { done("", "没有计划校验器"); return; }
@@ -1318,7 +1344,7 @@
       setTimeout(function () {
         if (!finished) { finished = true; delete WP_ANSWERS[askId]; done("", "等分析窗口回答超时"); }
       }, 180000);
-    }, null, true);
+    }, null, true, "", false, { sessionTitle: WB_PLANNER_KEY, kind: "分批分析" });
   }
 
   // 把计划判成可用的 lanes（校验不过就回退）。
@@ -1474,6 +1500,10 @@
           runEl.classList.remove("wb-run-parallel");
           runEl.querySelector("[data-wb-phase]").textContent = "串行执行";
           runEl.querySelector("[data-wb-progress]").textContent = "已选 " + res.total + " 件 · 待开始";
+          // 串行没有「路」：必须把上一轮并行留下的 lanes 清掉。
+          // 留着的话 wbConvKey 会拿旧 lane.key 当会话键 —— 串行的卡就接进上轮
+          // 某个并行窗口的会话里，而「执行台」那条永远建不起来（窗口复用错位）。
+          WB.lanes = [];
           stepsEl.innerHTML = order.map(function (s, i) {
             return '<li class="wb-step" data-wb-step="' + esc(s.id) + '"><span class="wb-step-i">' +
               (i + 1) + "</span><span class=\"wb-step-id\">" + esc(s.id) + "</span>" +
@@ -1639,7 +1669,10 @@
       // 宿主侧对「映射表里的会话已被删」有兜底（会自动新建），这里不必自己防。
       var fresh = false, inline = true;
       var finished = false;
-      harnessPostWithCapture(wbConvKey(batchCards[0].id) || ("路 · " + (lane.prefix || "")), text, fresh, function (result) {
+      // 窗口名 = 这一路的复用键（计划给的 lane.key）**本身**，不再拼「路 · 前缀」那种
+      // 第二段 —— 左侧只该看到一个窗口名，而不是「名称 · 名称」。
+      var laneKey = wbConvKey(batchCards[0].id) || ("路 · " + (lane.prefix || ""));
+      harnessPostWithCapture(laneKey, text, fresh, function (result) {
         if (finished) return;
         if (!result.ok) {
           finished = true;
@@ -1660,7 +1693,7 @@
         setTimeout(function () {
           if (!finished) { finished = true; delete WP_ANSWERS[askId]; finishLaneBatch({ ok: false, error: "等 Harness 回答超时" }); }
         }, 300000);
-      }, null, inline, "", fresh);
+      }, null, inline, "", fresh, { sessionTitle: laneKey, kind: lane.prefix || "" });
 
       // 本批收尾：逐张 release → 记 done → 该路进下一批（不碰别的路）
       function finishLaneBatch(res) {
@@ -1863,13 +1896,15 @@
   // 同 __wb：只给测试/扩展用，正常页面不读它。
   try { window.__wbConvKey = wbConvKey; } catch (e) {}
   // convKey：并行按「路」执行时，同一路的卡共用同一个会话键（左侧会话列表就
-  // 是每路一条对话）。缺省 convKey=空 → 每张卡各自一个会话（按卡 id 圈定）。
+  // 是每路一条对话）。串行没有「路」，一律落到固定的「执行台」那条会话 ——
+  // 以前缺省空 → 回落成卡 id，于是串行跑 N 张卡就新开 N 个窗口，
+  // 用户问「除了调度台，其他对话会复用吗」时的答案就是「不会」，这正是要修的。
   function workbenchAsk(itemTitle, done, convKey) {
     if (!harnessEnv()) { done({ ok: false, error: "要在 Harness 里打开才能问 AI" }); return; }
     var env = harnessEnv();
     var ledgerPath = env && env.dir ? env.dir : "";
-    // 会话键：有 convKey 就用它（并行=每路一条独立对话）；否则回落成卡 id。
-    var convTitle = convKey || itemTitle;
+    // 会话键：有 convKey 就用它（并行=每路一条独立对话）；串行=固定「执行台」。
+    var convTitle = convKey || WB_EXEC_KEY;
     // itemTitle 形如「OPS-022 · 标题」，前半就是卡 id，供它去 ledger.json 里定位。
     var cleanId = String(itemTitle || "").split("·")[0].trim() || "";
     var text =
@@ -1882,7 +1917,11 @@
       "3) 处理完把这条卡在 ledger.json 里的状态收口：从 board.config.json 里该车道的 stages 取一个「未列在 stages 的收口状态」（如 bug 车道 fixed/closed、feature 车道 shipped、risk 车道 resolved/accepted），把 status 改成它，或至少推进到相对靠后的阶段；\n" +
       "4) 简要回报你做了什么、改动了什么、这条卡现在的状态。\n" +
       "不要跳过处理直接写建议 —— 队列里同区域的下一张卡正等这一张真正收口才能开工。";
-    var fresh = true;
+    // fresh:false = 复用固定「执行台」那条会话。
+    // 以前这里是 true：每张卡新开一个窗口，串行跑 10 张就建 10 条会话，
+    // 用户问「除了调度台，其他对话会复用吗」时的答案是「不会」—— 这就是那条根因。
+    // 串行本来就是一张接一张，交给同一个窗口接着做，上下文还是热的。
+    var fresh = false;
     var inline = true;
     var askId = "";
     var finished = false;
@@ -1907,11 +1946,10 @@
       setTimeout(function () {
         if (!finished) { finished = true; delete WP_ANSWERS[askId]; done({ ok: false, error: "等 Harness 回答超时", by: by }); }
       }, 240000);
-    }, null, inline, "", fresh);
+    }, null, inline, "", fresh, { sessionTitle: convTitle, kind: "逐张执行" });
   }
 
-  function workbenchAskListener(event) {
-    if (event.origin !== window.location.origin) return;
+  function workbenchAskListener(event) {    if (event.origin !== window.location.origin) return;
     var d = event.data;
     if (!d || d.type !== "ops-board/answer") return;
     var rec = WP_ANSWERS[d.askId];
@@ -1920,7 +1958,14 @@
   window.addEventListener("message", workbenchAskListener);
 
   // 简化版 harnessPost：直接构造 payload 调 /ops-board/ask，不碰 AI 面板状态。
-  function harnessPostWithCapture(itemTitle, text, fresh, done, skillName, inline, reuseSessionId, withContext) {
+  //
+  // item / title / sessionTitle 三个字段的分工（以前 item 和 title 传的是同一个字符串，
+  // 宿主按「item · title」拼标题，于是左侧会话名全是「名称 · 名称」）：
+  //   item        = **复用键**（宿主拿它在映射表里找会话），必须是稳定的窗口名；
+  //   title       = 显示用的补充说明，**不能等于 item**，否则又拼成重复的两段；
+  //   sessionTitle= 完整的会话名。宿主有它就**优先用**（index.js askInHarness），
+  //                 于是左侧只显示窗口名本身，不再有「· 后面那半截」。
+  function harnessPostWithCapture(itemTitle, text, fresh, done, skillName, inline, reuseSessionId, withContext, opts) {
     var env = harnessEnv();
     // 没有 __OPS_HARNESS__ 说明这页不是被 Harness 面板加载的（直接开 dist/index.html、
     // 或 serve.mjs 的裸地址）。此时 /ops-board/ask 根本不存在，env 是 null —— 原来直接读
@@ -1934,12 +1979,25 @@
       return;
     }
     var askId = "ask-w-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
+    // 三个字段各司其职，缺一就会退化成「名称 · 名称」：
+    //   item        复用键（宿主拿它查映射表，必须稳定）
+    //   title       旧宿主的兜底后缀（它按「item · title」拼），绝不能等于 item
+    //   sessionTitle 新宿主直接拿来当会话名 → 左侧只显示窗口名本身
+    var opt = opts || {};
+    var keyName = String(itemTitle || "").trim() || "整本台账";
+    var wantName = String(opt.sessionTitle || "").trim() || keyName;
+    var kind = String(opt.kind || "").trim();
+    // 兜底后缀：**任何情况下都不许等于 item**，否则旧宿主拼出来又是重复的两段
+    // （「整批全交 · 整批全交」这种，因为整批全交的 prefix 和 key 本来就是同一个词）。
+    // 新宿主有 sessionTitle 会直接用，这一截只在旧宿主（还没转发 sessionTitle）时兜底。
+    if (!kind || kind === keyName || kind === wantName) kind = "执行窗口";
     var payload = {
       board: env.id,
       dir: env.dir,
       label: env.label,
-      item: itemTitle,
-      title: itemTitle,
+      item: keyName,
+      title: kind,
+      sessionTitle: wantName,
       fresh: !!fresh,
       askId: askId,
       reuseSessionId: reuseSessionId || "",
