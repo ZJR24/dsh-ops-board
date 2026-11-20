@@ -1561,6 +1561,85 @@
     return box ? !!box.checked : false;
   }
 
+  // ── 结论格式约定（2026-11-21 起）──────────────────────────────────
+  //
+  // 为什么要它：工作台要判断「这轮到底做成了没」，以前只能**猜** Agent 那句自然语言。
+  // 猜错的代价是真的 —— 我们曾把「我看了，但没改台账」当成「处理完成」，
+  // 一排绿条里混着几张假的，只能翻日志才知道哪几张真成了。
+  //
+  // 借的是 agent-autoloop 的做法：让 Agent 在**第一行**用一个固定前缀表明结果。
+  // 这样判定就是「读前缀」，不是「理解语义」。
+  //
+  // 三种前缀（都必须顶格写在第一行）：
+  //   完成：…      → 真做完了
+  //   未完成：原因  → 跑了但这轮没做成（值得重试）
+  //   无需处理：原因 → 看过了，本来就没事（不该重试，也不该算失败）
+  //
+  // ⚠️ 「无需处理」是刻意跟「未完成」分开的：它同样是"没改状态"，但重试毫无意义
+  //    （比如这张卡其实已经被别处修好了）。混成一种会导致白烧三轮 Token。
+  var WB_VERDICT_DONE = "完成";
+  var WB_VERDICT_FAIL = "未完成";
+  var WB_VERDICT_NA = "无需处理";
+
+  // 拼「这一轮怎么回报结论」那一段。三个执行入口（逐张 / 整批 / 路批量）共用一份，
+  // 免得三处话术各写一份、改一处漏两处（演练提示就是这么抽出来的）。
+  function wbVerdictNote() {
+    return (
+      "【怎么回报结论】你的最后一条消息**第一行**必须是下面三种之一，顶格写、后面跟中文冒号：\n" +
+      "- " + WB_VERDICT_DONE + "：<一句话说清做成了什么>\n" +
+      "- " + WB_VERDICT_FAIL + "：<为什么没做成，大白话>\n" +
+      "- " + WB_VERDICT_NA + "：<为什么不需要处理，比如本来就已修好>\n" +
+      "这三种决定了看板上这张卡算不算做完，所以别用别的前缀、别把结论写在第二行以后。\n" +
+      "第一行之后随便补充细节。"
+    );
+  }
+
+  // 读 Agent 那一段话，判断这轮算哪种结果。
+  //
+  // 返回 { kind: "done" | "failed" | "na" | "unknown", line, detail }
+  //   · 先找**第一个非空行**里有没有约定前缀（允许前面有 markdown 粗体/列表符号，
+  //     因为模型很爱写「**完成**：」或「- 完成：」，那不该被判成不合格）；
+  //   · 找不到 → kind = "unknown"，由调用方按「没表态」处理（默认当没做成，
+  //     但**不重试**，见 settle 里的处理）。
+  function wbParseVerdict(text) {
+    var raw = String(text || "");
+    var lines = raw.split(/\r?\n/);
+    var first = "";
+    for (var i = 0; i < lines.length; i++) {
+      var t = lines[i].trim();
+      if (t) { first = t; break; }
+    }
+    // 去掉行首的 markdown 装饰：列表符号、引用号、粗体/斜体标记、标题井号
+    var probe = first
+      .replace(/^[-*+]\s+/, "")
+      .replace(/^>\s*/, "")
+      .replace(/^#{1,6}\s*/, "")
+      .replace(/^\*\*([\s\S]*?)\*\*/, "$1")
+      .replace(/^\*([\s\S]*?)\*/, "$1")
+      .replace(/^__([\s\S]*?)__/, "$1")
+      .trim();
+    function head(prefix) {
+      // 「完成：xxx」「完成: xxx」「完成 xxx」都认（冒号全角半角皆可，也允许直接空格）
+      if (probe.indexOf(prefix) !== 0) return null;
+      var rest = probe.slice(prefix.length).replace(/^[：:]\s*/, "");
+      // 防止「未完成」被「完成」先吃掉 —— 「未完成」不以「完成」开头，天然没事；
+      // 但「无需处理」也各自独立，这里再加一层保险：前缀后面必须是冒号或结尾/空白。
+      if (probe.length > prefix.length) {
+        var next = probe.charAt(prefix.length);
+        if (next !== "：" && next !== ":" && !/\s/.test(next)) return null;
+      }
+      return rest;
+    }
+    // 顺序有讲究：先试长的、更具体的，避免「未完成」被别的规则抢走。
+    var hit = head(WB_VERDICT_FAIL);
+    if (hit !== null) return { kind: "failed", line: first, detail: hit };
+    hit = head(WB_VERDICT_NA);
+    if (hit !== null) return { kind: "na", line: first, detail: hit };
+    hit = head(WB_VERDICT_DONE);
+    if (hit !== null) return { kind: "done", line: first, detail: hit };
+    return { kind: "unknown", line: first, detail: "" };
+  }
+
   // 拼「请只做个回应、别动台账」那一段。三个执行入口（逐张 / 整批 / 路批量）共用，
   // 免得三处话术各写一份、改一处漏两处。
   function wbRehearsalNote(ids, ledgerPath) {
@@ -1947,7 +2026,8 @@
         "bug→fixed/closed、feature→shipped、risk→resolved/accepted，或至少推进到靠后阶段），让队列能往下走。\n\n" +
         "台账文件在：" + (ledgerPath || "（当前看板目录）") + "\\ledger.json\n" +
         "本次交给你的卡片清单：\n" + listText + "\n\n" +
-        "这是真实执行，不是分析建议：请实际处理并更新台账，处理完简要回报你动过的每张卡和它现在的状态。";
+        "这是真实执行，不是分析建议：请实际处理并更新台账，处理完简要回报你动过的每张卡和它现在的状态。\n\n" +
+        wbVerdictNote();
       // fresh:false = 复用这条队列已有的对话窗口（窗口复用）。
       // 以前这里是 true，意味着**每批都新开一个会话**——一条路里 3 张卡、每批 1 张，
       // 就是 3 个窗口，而不是「一个窗口接三次活」。那正是用户说的
@@ -1994,6 +2074,15 @@
         });
         workbenchLog("路「" + lane.prefix + "」第 " + (Math.floor(cursor / perBatch) + 1) + " 批：" +
           (okAsk ? "窗口处理完成" : "处理失败——" + verdict.slice(0, 60)));
+        // 整批的自报前缀（一次 ask 只能拿到一段话，所以按整批判）
+        var batchVerdict = wbParseVerdict(verdict);
+        if (batchVerdict.kind === "failed") {
+          workbenchLog("路「" + lane.prefix + "」自报「" + WB_VERDICT_FAIL + "」：" +
+            (batchVerdict.detail || "（没写原因）").slice(0, 80));
+        } else if (batchVerdict.kind === "unknown" && okAsk) {
+          workbenchLog("路「" + lane.prefix + "」没按约定前缀回报结论（首行：" +
+            (batchVerdict.line || "（空）").slice(0, 40) + "）。");
+        }
         var rel = claimed.slice();
         (function releaseAll(k) {
           if (!WB.run) return;
@@ -2009,11 +2098,28 @@
                 var moved = after !== prev;
                 var closed = moved && !isOpenWbStatus(after);
                 var tail = closed ? " · 已收口" : (moved ? " · 状态：'" + prev + "'→'" + after + "'" : " · 仍在 " + (after || prev) + "，未收口");
-                workbenchMark(stepEls[c.id], closed ? "done" : "wait", (verdict.slice(0, 80) + tail).slice(0, 140));
+                // 整批只回一段话，没法逐卡区分自报前缀，所以前缀只当**整批**的旁证：
+                //   · 台账已收口 → 一定算成（最可靠）；
+                //   · 没动但整批自报「完成」→ 也算成、日志留痕；
+                //   · 整批自报「无需处理」→ 记完成且不重试（每张都没动台账时才有意义）。
+                var settledOk = closed;
+                var skipped = false;
+                if (!closed) {
+                  if (batchVerdict.kind === "done") {
+                    settledOk = true;
+                    workbenchLog("「" + c.id + "」整批自报「" + WB_VERDICT_DONE + "」但台账没动，按完成记（请留意）。");
+                  } else if (batchVerdict.kind === "na") {
+                    settledOk = true;
+                    skipped = true;
+                  }
+                }
+                workbenchMark(stepEls[c.id], settledOk ? (skipped ? "na" : "done") : "wait",
+                  (verdict.slice(0, 80) + tail).slice(0, 140));
                 c.active = false;
-                if (closed) {
+                if (settledOk) {
                   c.done = true;
                   c.stuck = false;
+                  if (skipped) c.skipped = true;
                 } else {
                   // 没做成：留在队列里等这一路下一轮重派，连试 3 次才停。
                   c.tries = (c.tries || 0) + 1;
@@ -2125,10 +2231,31 @@
             // 也就是说「回读台账看状态变没变」这一步**从来没生效过**。
             // 现在按数组 find。
             var afterStatus = itemStatusFromBoard(lr, id);
-            var settledOk = finishVerdict(afterStatus, "");
+            var ledgerClosed = finishVerdict(afterStatus, "");
+            // 结合 Agent 自报的前缀一起判（2026-11-21）：
+            //   · 台账已收口 → 一定算成（实测最可靠的信号，不信它自报）；
+            //   · 台账没动，但它说「完成」→ 也算成，但日志里记一笔「自报完成、台账未动」，
+            //     方便回头查是不是又出现「嘴上做完」；
+            //   · 它说「无需处理」→ 算成**且不重试**（重试没有意义，比如别处已修好）；
+            //   · 它说「未完成」或没表态 → 不算成，进重试分支。
+            var v = wbParseVerdict(verdict);
+            var settledOk = ledgerClosed;
+            var skipRetry = false;
+            if (!ledgerClosed) {
+              if (v.kind === "done") {
+                settledOk = true;
+                workbenchLog("「" + id + "」自报「" + WB_VERDICT_DONE + "」但台账状态没动，按完成记（请留意这张卡）。");
+              } else if (v.kind === "na") {
+                settledOk = true;
+                skipRetry = true;
+                workbenchLog("「" + id + "」自报「" + WB_VERDICT_NA + "」：" + (v.detail || "（没写原因）").slice(0, 80) + " —— 不重试。");
+              } else if (v.kind === "unknown" && okAsk) {
+                workbenchLog("「" + id + "」没按约定前缀回报结论（首行：" + (v.line || "（空）").slice(0, 40) + "），按未做成处理。");
+              }
+            }
             var by = (res && res.by) || WB.by || flowActor();
             releaseForWorkbench(id, by, function (releaseOk) {
-              settle(next.o, stepEl, verdict, settledOk);
+              settle(next.o, stepEl, verdict, settledOk, skipRetry);
               if (!WB.run) return;
               setTimeout(function () { if (WB.run) workbenchPump(); }, 400);
             });
@@ -2146,19 +2273,27 @@
     //
     // 现在的规矩：
     //   · **真收口**（状态离开未收口集合）→ done，正常推进下一张；
-    //   · **没做成**（还在原状态）→ 不记 done，`badTries+1`，稍等重派；
+    //   · **自报「完成」**（台账没动但首行这么写）→ 也记 done，但日志留痕；
+    //   · **自报「无需处理」** → 记 done 且**不重试**（重试没意义，比如别处已修好）；
+    //   · **没做成**（还在原状态）→ 不记 done，`tries+1`，稍等重派；
     //   · 连试 3 次还是不成 → 标红停下（`stuck`），日志写清楚，
     //     不再无限烧 Token，也不再假装它成功了。
     //
     // 为什么上限是 3：模型每次重试都要花真钱，而「同一张卡 3 次都改不动台账」
     // 基本已经不是抖动、而是卡在某个要人判断的地方了 —— 那时候该人来拍板。
-    function settle(o, stepEl, verdict, settledOk) {
+    function settle(o, stepEl, verdict, settledOk, skipRetry) {
       o.active = false;
       delete WB.inflight[o.id];
       if (settledOk) {
         o.done = true;
         o.result = verdict;
         o.stuck = false;
+        // 「无需处理」的卡单独标一下：它没被改过状态，但也不该被当成做成了。
+        // 界面上给个中性的灰条，免得用户以为「这张真的修好了」。
+        if (skipRetry) {
+          o.skipped = true;
+          workbenchMark(stepEl, "na", "无需处理（没动台账）");
+        }
         WB.doneCount = WB.order.filter(function (x) { return x.done; }).length;
         updateWbProgress();
         return;
@@ -2305,7 +2440,8 @@
       "2) 实际动手解决它（排查/修改/清理/更新），拿真实证据，不要只给空泛建议；\n" +
       "3) 处理完把这条卡在 ledger.json 里的状态收口：从 board.config.json 里该车道的 stages 取一个「未列在 stages 的收口状态」（如 bug 车道 fixed/closed、feature 车道 shipped、risk 车道 resolved/accepted），把 status 改成它，或至少推进到相对靠后的阶段；\n" +
       "4) 简要回报你做了什么、改动了什么、这条卡现在的状态。\n" +
-      "不要跳过处理直接写建议 —— 队列里同区域的下一张卡正等这一张真正收口才能开工。";
+      "不要跳过处理直接写建议 —— 队列里同区域的下一张卡正等这一张真正收口才能开工。\n\n" +
+      wbVerdictNote();
     // fresh:false = 复用固定「执行台」那条会话。
     // 以前这里是 true：每张卡新开一个窗口，串行跑 10 张就建 10 条会话，
     // 用户问「除了调度台，其他对话会复用吗」时的答案是「不会」—— 这就是那条根因。
@@ -2420,7 +2556,7 @@
   function workbenchMark(stepEl, cls, note) {
     if (!stepEl) return;
     // 也清掉「排队中」：这张卡一旦真的轮到它跑，虚线边和「等 XXX」就不再成立。
-    stepEl.classList.remove("wb-step-pending", "wb-step-running", "wb-step-asking", "wb-step-done", "wb-step-skip", "wb-step-wait", "wb-step-queued", "wb-step-stuck");
+    stepEl.classList.remove("wb-step-pending", "wb-step-running", "wb-step-asking", "wb-step-done", "wb-step-skip", "wb-step-wait", "wb-step-queued", "wb-step-stuck", "wb-step-na");
     if (stepEl.getAttribute("data-wb-queued")) stepEl.removeAttribute("data-wb-queued");
     stepEl.classList.add("wb-step-" + cls);
     if (note) {

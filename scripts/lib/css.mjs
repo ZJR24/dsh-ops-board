@@ -567,6 +567,12 @@ tbody tr:hover{background:var(--surface)}
 .wb-step-done{border-left-color:var(--green)}
 .wb-step-done .wb-step-title{text-decoration:line-through;color:var(--muted)}
 .wb-step-skip{border-left-color:var(--red);opacity:.6}
+/* 「无需处理（没动台账）」（2026-11-21）：
+   Agent 自报「无需处理」——比如这张卡其实已经被别处修好了。
+   它不是失败（所以不能红），但也不是「我真做成了」（所以不能绿），
+   用中性灰 + 虚线边，一眼看出「这轮什么都没改，但也不是出错」。 */
+.wb-step-na{border-left-color:var(--rule2);border-left-style:dashed;opacity:.78}
+.wb-step-na .wb-step-title{color:var(--muted)}
 /* 「试了几次都没做成，等你看看」（2026-11-20）。
    它和 done 必须**一眼分得开** —— 以前的毛病正是「没做成」被记成「完成」，
    一排绿条里混着几张假的。这里用红边 + 淡红底 + 不划掉标题：
