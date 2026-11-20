@@ -266,7 +266,15 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .section-fold{appearance:none;-webkit-appearance:none;flex:none;align-self:center;display:inline-flex;align-items:center;gap:7px;margin:0;padding:2px 4px 2px 0;border:0;background:none;color:var(--ink);cursor:pointer;font:inherit}
 .section-fold::before{content:"";flex:none;width:4px;height:.95em;background:var(--red)}
 .section-fold::after{content:"";flex:none;width:5px;height:5px;border-right:1px solid var(--muted);border-bottom:1px solid var(--muted);transform:rotate(45deg) translate(-1px,-1px);transition:transform .15s}
-.section-head.is-collapsed .section-fold::after{transform:rotate(-45deg) translate(-1px,1px)}
+/* 收起时箭头翻转。
+   ⚠️ 必须同时覆盖 .section-head 和 .workbench-head（2026-11-20 用户报
+   「总览的工作台的收缩按钮，收放不会旋转」）：
+   折叠状态是 JS 按「按钮所在的那个标题容器」加 class 的 ——
+   普通模块加在 .section-head 上，工作台那块加在 .workbench-head 上
+   （它没有 .section-head，是 .workbench-head）。原来只写了 .section-head
+   一条，于是工作台那颗按钮**永远指向下**，收起了也不转。 */
+.section-head.is-collapsed .section-fold::after,
+.workbench-head.is-collapsed .section-fold::after{transform:rotate(-45deg) translate(-1px,1px)}
 .section-fold:hover::after{border-color:var(--ink)}
 .section-fold:focus-visible{outline:2px solid var(--red);outline-offset:2px}
 /* 收起来时标题右侧仍要能看出这一块有多少东西，不然只剩一个名字 */

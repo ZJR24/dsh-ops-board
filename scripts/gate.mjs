@@ -57,6 +57,8 @@ const SUITES = [
   { name: "no-details-title-practise", file: "no-details-title-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "history-gap-cyber", file: "history-gap-test.mjs", args: ["--board", CYBER], why: "处理记录筛选条与首条间距（大看板）" },
   { name: "history-gap-practise", file: "history-gap-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板，记录太少会跳过）" },
+  { name: "fold-rotate-cyber", file: "fold-rotate-test.mjs", args: ["--board", CYBER], why: "折叠按钮箭头随收放旋转（大看板）" },
+  { name: "fold-rotate-practise", file: "fold-rotate-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
   { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },
