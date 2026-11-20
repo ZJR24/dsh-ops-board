@@ -51,6 +51,8 @@ const SUITES = [
   { name: "feature-planlist-practise", file: "feature-planlist-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "risk-mitigating-cyber", file: "risk-mitigating-test.mjs", args: ["--board", CYBER], why: "风险车道去掉「缓解中」（大看板）" },
   { name: "risk-mitigating-practise", file: "risk-mitigating-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
+  { name: "cell-target-cyber", file: "cell-target-test.mjs", args: ["--board", CYBER], why: "阶段格子落点与目标分组标题对得上（大看板）" },
+  { name: "cell-target-practise", file: "cell-target-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
   { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },

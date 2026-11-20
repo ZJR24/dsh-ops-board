@@ -151,7 +151,7 @@ function miniToggle(listId) {
   return `<button class="rail-mini-toggle" type="button" aria-expanded="true" aria-controls="${esc(listId)}">收起明细</button>`;
 }
 
-export function railLanePanel(config, ledger, lane) {
+export function railLanePanel(config, ledger, lane, availableClosedIds) {
   const items = itemsOfLane(ledger, lane.key);
   const counts = countOfLane(lane, items);
   const openN = openCountOfLane(lane, items);
@@ -162,19 +162,16 @@ export function railLanePanel(config, ledger, lane) {
     .join(" | ");
   const grid = lane.stages
     .map((s) => {
-      // 和车道页状态表同一个判据：已收口阶段的卡片在收口页。
-      // 但收口页只在**真有收口条目**时才渲染那一组 —— 没有的时候不能给链接，
-      // 否则是死链（practise 板 0 收口就是这个情况）。
-      const hasClosedGroup = itemsOfLane(ledger, lane.key).some((i) => isClosedLaneItem(lane, i));
       const body = `<span class="stage-num">${counts[s.key]}</span><span class="stage-label">${esc(s.label)}</span>`;
-      if (s.open === false && !hasClosedGroup) {
-        return `<span class="is-static">${body}</span>`;
+      if (s.open === false) {
+        // 和车道页状态表同一套：落点按**状态**算，且目标组不存在时退回静态。
+        const hasClosed = itemsOfLane(ledger, lane.key).some((i) => isClosedLaneItem(lane, i));
+        const gid = closedGroupIdFor(lane, s);
+        const exists = hasClosed && (!availableClosedIds || availableClosedIds.has(gid));
+        if (!exists) return `<span class="is-static">${body}</span>`;
+        return `<a href="#${gid}" title="跳到收口页的「${esc(s.label)}」那一组">${body}</a>`;
       }
-      const anchor = s.open === false ? `stage-${lane.key}-closed` : `stage-${lane.key}-${s.key}`;
-      const title = s.open === false
-        ? `跳到「${esc(lane.label)} · 已收口」（卡片在收口页）`
-        : `跳到 ${esc(s.label)} 分节`;
-      return `<a href="#${anchor}" title="${title}">${body}</a>`;
+      return `<a href="#stage-${lane.key}-${s.key}" title="跳到 ${esc(s.label)} 分节">${body}</a>`;
     })
     .join("");
 
@@ -523,27 +520,32 @@ export function lanesWithClosed(config, ledger) {
 //
 // 格子的落点分两种（2026-11-20 用户定：「跳转到收口页的相应行」）：
 //   · **未收口阶段** → 跳本页的分节（`#stage-<lane>-<stage>`），那里有卡片可筛；
-//   · **已收口阶段** → 跳**收口页**对应的分组（`#stage-<lane>-closed`）。
+//   · **已收口阶段** → 跳**收口页**里认领它的那一组（见 closedGroupIdFor）。
 //     这些阶段的卡片全在收口页，车道页上那节已经不渲染了（见 shouldRenderStageSection），
 //     指回本页就是死链 —— verify-board 第 7 条会报。
 //
-// 注意同一车道的多个收口阶段指向**同一个**分组（需求的「已上线」「暂停」都归「已解决」那组），
-// 和收口页那块合并状态表的语义保持一致：点任一格看到的是整组，不是单个状态。
-export function stageBoard(lane, items, closedLanes) {
+// ⚠️ 落点必须**逐阶段**算，不能按车道算（2026-11-20 修的真 bug）：
+// 收口页分组是按**状态**划的，需求车道的「已上线」去「已上线」组、
+// 「暂停」去「已暂停」组 —— 两个格子目标不同。以前两处都写死
+// `stage-<lane>-closed`，于是点「暂停」落到「已上线」那一组。
+export function stageBoard(lane, items, closedLanes, availableClosedIds) {
   const counts = countOfLane(lane, items);
   const openN = openCountOfLane(lane, items);
-  // 这块板有没有收口条目 —— 没有的话收口页不会渲染 #stage-<lane>-closed，
-  // 已收口那几格就只能做静态数字，否则是死链（verify-board 第 7 条会报）。
+  // closedLanes 只回答「这条车道有没有收口条目」；**具体哪一组存在**由 closedGroups 定。
+  // 这里保留它做粗筛（一条收口都没有的车道，所有收口格都该静态），
+  // 再对每一格用 availableClosedIds 精确判断。
   const hasClosedGroup = closedLanes ? closedLanes.has(lane.key) : true;
   const cells = lane.stages
     .map((s) => {
       const label = `<b>${counts[s.key]}</b><span>${esc(s.label)}</span>`;
-      if (s.open === false && !hasClosedGroup) {
+      if (s.open === false) {
         // 收口页没那一组：不给链接。和 closedBoard 对 0 项格子的处理保持一致。
-        return `<span class="stage-board-cell is-static">${label}</span>`;
+        const gid = closedGroupIdFor(lane, s);
+        const exists = hasClosedGroup && (!availableClosedIds || availableClosedIds.has(gid));
+        if (!exists) return `<span class="stage-board-cell is-static">${label}</span>`;
+        return `<a class="stage-board-cell" href="#${gid}">${label}</a>`;
       }
-      const anchor = s.open === false ? `stage-${lane.key}-closed` : `stage-${lane.key}-${s.key}`;
-      return `<a class="stage-board-cell" href="#${anchor}">${label}</a>`;
+      return `<a class="stage-board-cell" href="#stage-${lane.key}-${s.key}">${label}</a>`;
     })
     .join("");
   return `<div class="stage-board">
@@ -599,7 +601,44 @@ export const CLOSED_GROUPS = [
 const CLAIMED_STATUSES = new Set(CLOSED_GROUPS.flatMap((g) => g.statuses));
 
 /**
+ * 某个「已收口阶段」的卡片，实际落在收口页的**哪一组**？
+ *
+ * ⚠️ 这个函数存在的唯一理由是修一个真 bug（2026-11-20 用户报
+ * 「点暂停跳过去显示的是已关闭/已上线」）：
+ *
+ * 三十五改把收口页按**状态**重划成三组（已解决 / 已上线 / 已暂停），
+ * 不再是「一个车道一组」。但车道页那两处格子还在用 `stage-<lane>-closed`
+ * 拼落点 —— 那是按**车道**拼的。于是：
+ *   · 需求车道的「暂停」（paused）本该去「已暂停」组，
+ *     却指向 `#stage-feature-closed`，那是「已上线」组；
+ *   · 需求的「已上线」也指向同一个 id，两个格子落到同一组，
+ *     点「暂停」看到的是「已上线」那一组的内容。
+ *
+ * 现在改成**从 CLOSED_GROUPS 反查**：拿这条 lane + 这个阶段的状态，
+ * 找出认领它的那一组，用那组的 id。查不到（配置里新增了没人认领的状态）
+ * 就退回「其他已收口」组的 id，和 closedGroupsOf 的兜底保持一致。
+ */
+function closedGroupIdFor(lane, stage) {
+  const hit = CLOSED_GROUPS.find(
+    (g) => g.laneKeys.includes(lane.key) && (stage.statuses || []).some((st) => g.statuses.includes(st))
+  );
+  return hit ? hit.id : "stage-closed-other";
+}
+
+/**
+ * 这一版台账里**实际会渲染**的收口分组 id 集合。
+ *
+ * 给「车道页 / 侧栏的阶段格子能不能给链接」用：目标组不存在时必须是静态数字，
+ * 否则就是死链（verify-board 第 7 条会报）。和 closedGroupsOf 用的是同一个
+ * 过滤条件（组非空才渲染），所以两边不会各说各话。
+ */
+export function closedIdsOf(config, ledger) {
+  return new Set(closedGroupsOf(config, ledger).map((g) => g.id));
+}
+
+/**
  * 把台账里的已收口条目分到各组。
+ *
  * 返回 [{ ...group, items: [{ lane, item }] }]，**只含非空的组**（页面按需渲染）。
  * 「其他」组只在真有漏网状态时才出现。
  */

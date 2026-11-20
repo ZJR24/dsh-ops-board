@@ -37,6 +37,7 @@ import {
   stageBoard,
   closedBoard,
   closedGroupsOf,
+  closedIdsOf,
   shouldRenderStageSection,
   lanesWithClosed,
   legend,
@@ -454,6 +455,10 @@ function viewLane(config, ledger, lane) {
   const items = itemsOfLane(ledger, lane.key);
   // 这块板哪些车道真有收口条目 —— 决定已收口阶段的格子能否指到收口页的分组。
   const closedLanes = lanesWithClosed(config, ledger);
+  // 哪些**具体分组**实际会渲染（按状态划的组，不是按车道）。
+  // 格子落点必须按这个精确判断：需求车道的「已上线」「暂停」指向两个不同的组，
+  // 某一组没条目时那一格就得是静态的（2026-11-20 修的真 bug）。
+  const closedIds = closedIdsOf(config, ledger);
   // 「计划中」这一阶段右侧的入口：谈的是「要加什么功能」，作用域是需求车道。
   // 只在需求车道的 planned 阶段挂，其它车道各阶段的标题栏保持原样。
   const plannedKey = lane.key === "feature"
@@ -479,7 +484,7 @@ function viewLane(config, ledger, lane) {
   <div class="details-main">
     <div class="kicker">${esc(lane.label)}</div>
     <h1 class="details-title">按阶段推进</h1>
-    ${stageBoard(lane, items, closedLanes)}
+    ${stageBoard(lane, items, closedLanes, closedIds)}
     ${lanePendingBlock(config, ledger, lane)}
     ${blocks}
     ${legend(config, lane)}
@@ -898,8 +903,11 @@ function buildHtml(config, ledger) {
     })
     .join("\n");
 
+  // 侧栏的阶段表也要知道「哪些收口分组实际会渲染」，否则它的空格子会指向不存在的
+  // 落点（和车道页状态表同一个判据，共用 closedIdsOf）。
+  const railClosedIds = closedIdsOf(config, ledger);
   const rail = [
-    ...config.lanes.map((lane) => railLanePanel(config, ledger, lane)),
+    ...config.lanes.map((lane) => railLanePanel(config, ledger, lane, railClosedIds)),
     railPriorityPanel(config, ledger),
     railMetricsPanel(config, ledger),
     railSnapshotPanel(config, ledger),
