@@ -98,10 +98,15 @@ const openInfo = JSON.parse(await ev(`JSON.stringify((function(){
 const missing = openInfo.filter((s) => !s.exists);
 ok(missing.length === 0, "所有未收口阶段的分节都保留着",
   missing.length ? "缺：" + missing.map((s) => s.lane + "/" + s.label).join(",") : openInfo.length + " 个都在");
-// 「计划中」即使 0 项也必须在（旁边挂着「和 AI 谈谈要加什么」）
+// 「计划中」即使 0 项也必须在（旁边挂着「和 AI 谈谈要加什么」）。
+// ⚠️ 必须**在 #stage-feature-planned 里**找按钮：2026-11-20 起需求页有两个
+// [data-ask-feature]（「计划列表」总览表也有一个），querySelector 取到的会是
+// 计划列表那个，closest('.detail-group') 就变成 null —— 这条会假红。
 const plannedOk = await ev(`(function(){
-  var b = document.querySelector('[data-ask-feature]');
-  if (!b) return { ok: false, reason: 'AI 入口不见了' };
+  var grp0 = document.getElementById('stage-feature-planned');
+  if (!grp0) return { ok: false, reason: '计划中分节不在' };
+  var b = grp0.querySelector('[data-ask-feature]');
+  if (!b) return { ok: false, reason: '计划中的 AI 入口不见了' };
   var grp = b.closest('.detail-group');
   return { ok: !!grp, id: grp ? grp.id : '' };
 })()`);

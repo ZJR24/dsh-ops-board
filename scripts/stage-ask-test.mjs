@@ -149,8 +149,12 @@ await wait(2600);
 
 // ── ① 按钮在「计划中」的分节标题里 ──────────────────────────────
 console.log("\n[1] 需求车道「计划中」右侧有入口按钮");
+// ⚠️ 2026-11-20 起需求页有**两个** [data-ask-feature]（「计划列表」总览表一个、
+// 「计划中」阶段一个），所以不能再用 querySelector 取第一个 —— 那个现在是计划列表里的。
+// 改成「在 #stage-feature-planned 里找」，才是在验「计划中那一节的入口」。
 const where = await ev(`(function(){
-  var b = document.querySelector('[data-ask-feature]');
+  var grp0 = document.getElementById('stage-feature-planned');
+  var b = grp0 ? grp0.querySelector('[data-ask-feature]') : null;
   if (!b) return null;
   var head = b.closest('.section-head');
   var grp = b.closest('.detail-group');
@@ -160,16 +164,18 @@ const where = await ev(`(function(){
     text: b.textContent.trim(),
     headTitle: h2 ? h2.textContent.trim() : '',
     groupId: grp ? grp.id : '',
-    inStageBoard: inNum
+    inStageBoard: inNum,
+    totalOnPage: document.querySelectorAll('[data-view="lane-feature"] [data-ask-feature]').length
   };
 })()`);
-ok(!!where, "页面上有这个按钮");
+ok(!!where, "「计划中」分节里有这个按钮");
 if (where) {
   ok(where.text === "和 AI 谈谈要加什么", "文案对", where.text);
   ok(where.headTitle === "计划中", "挂在「计划中」分节标题里", where.headTitle);
   ok(where.groupId === "stage-feature-planned", "就在 planned 那一段", where.groupId);
   // 第 4 项（去掉数字区表单）已被用户撤回，这条断言防它被误删/误搬
   ok(where.inStageBoard === false, "不在 .stage-board 数字格里（第 4 项已撤回，别搬过去）");
+  ok(where.totalOnPage === 2, "需求页一共两个入口（计划列表 + 计划中）", where.totalOnPage + " 个");
 }
 
 // 空阶段是常态：确认它即使 0 项也照样在（这是它存在的理由）

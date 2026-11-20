@@ -338,8 +338,11 @@ function viewSkills(config, ledger) {
 // 所以这里提到模块级，两处共用同一份渲染，标题文案和作用域按钮都不变。
 //
 // headAsk 是这一块标题右侧的入口按钮：问题块给「总结项目状态」（整本台账作用域），
-// 风险块给「风险审核」（只审风险这个车道）。
-function pendingSection(config, ledger, lane, title, emptyText, headAsk) {
+// 需求块给「和 AI 谈谈要加什么」（需求车道），风险块给「风险审核」（只审风险这个车道）。
+//
+// countNoun 是标题右侧那串计数的量词。默认「待处理」，需求车道传「待推进」——
+// 「3 个待处理功能」读着别扭，「3 个待推进功能」才是人话。
+function pendingSection(config, ledger, lane, title, emptyText, headAsk, countNoun) {
   if (!lane) return "";
   const openOfLane = (l) => {
     const openStages = l.stages.filter((s) => s.open);
@@ -353,8 +356,9 @@ function pendingSection(config, ledger, lane, title, emptyText, headAsk) {
     ? `<button class="btn btn-ask head-ask" type="button" ${headAsk.attr}>${esc(headAsk.label)}</button>`
     : "";
   const secKey = "pending-" + lane.key;
+  const noun = countNoun || "待处理";
   return `<section class="issue-section priority-block">
-  ${sectionHead({ title: esc(title), meta: `${items.length} 个待处理${askBtn}`, key: secKey })}
+  ${sectionHead({ title: esc(title), meta: `${items.length} 个${esc(noun)}${askBtn}`, key: secKey })}
   <div data-fold-body="${esc(secKey)}">
   ${body}
   </div>
@@ -411,15 +415,31 @@ function viewOverview(config, ledger) {
 </section>`;
 }
 
-// 车道页顶部那块「待处理」：只有问题和风险车道有。
+// 车道页顶部那块「待处理 / 计划列表」总览表。
 // 放在 stageBoard 之后 —— 2026-11-19 用户定的是「各个页面的第一个模块都是状态表」：
 // 进页面先看全局数字，紧接着才是还没收口的这摊事，再往下是按阶段铺开的全量。
+//
+// 2026-11-20 用户定：「新增功能也要有像问题修复（待处理问题）那样的总览表；
+// 这个总览表叫做计划列表」。所以三个车道都有这一块了，只是名字与作用域按钮不同：
+//   问题 → 待处理问题 / 「总结项目状态」（整本台账）
+//   需求 → 计划列表   / 「和 AI 谈谈要加什么」（需求车道；和「计划中」那个入口同一个作用域）
+//   风险 → 待处理风险 / 「风险审核」（风险车道）
 function lanePendingBlock(config, ledger, lane) {
   if (lane.key === "bug") {
     return pendingSection(config, ledger, lane, "待处理问题", "当前没有需要解决的问题。", {
       attr: "data-ask-global",
       label: "总结项目状态",
     });
+  }
+  if (lane.key === "feature") {
+    // 「计划列表」= 需求车道里**还没上线**的全部条目（计划中 + 开发中），
+    // 和「待处理问题」的语义一致：这一页要干的活的一张总表。
+    // 注意不能只取「计划中」—— 开发中的也是还没做完的计划，
+    // 只列 planned 会让这张表在开发阶段空掉，反而看不出在手的功能有多少。
+    return pendingSection(config, ledger, lane, "计划列表", "当前没有待推进的功能。", {
+      attr: "data-ask-feature",
+      label: "和 AI 谈谈要加什么",
+    }, "待推进");
   }
   if (lane.key === "risk") {
     return pendingSection(config, ledger, lane, "待处理风险", "当前没有待处理的风险。", {

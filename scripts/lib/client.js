@@ -4623,15 +4623,20 @@
     });
   }
 
-  // 需求车道「计划中」右侧的入口：跟 AI 谈还要加什么功能，作用域是需求车道。
-  var featureAsk = document.querySelector("[data-ask-feature]");
-  if (featureAsk) {
-    featureAsk.textContent = "和 AI 谈谈要加什么";
-    featureAsk.addEventListener("click", function (e) {
+  // 需求车道里「跟 AI 谈还要加什么功能」的入口，作用域是需求车道。
+  //
+  // ⚠️ 用 querySelectorAll 而不是 querySelector（2026-11-20）：
+  // 需求页现在有**两个**这样的按钮 —— 一个是「计划列表」总览表标题右侧的，
+  // 一个是「计划中」阶段标题右侧的（同一个作用域、同一件事，两处都放方便）。
+  // 原来只取第一个，第二个就是死按钮（点了没反应、也没任何提示）。
+  // 用 forEach 绑全部；文案统一在这里设，两处保持一致。
+  Array.prototype.forEach.call(document.querySelectorAll("[data-ask-feature]"), function (b) {
+    b.textContent = "和 AI 谈谈要加什么";
+    b.addEventListener("click", function (e) {
       e.preventDefault();
       openFeaturePanel();
     });
-  }
+  });
 
   // ─────────────────────── 搜索 ───────────────────────
 

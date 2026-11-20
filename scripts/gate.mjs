@@ -47,6 +47,8 @@ const SUITES = [
   { name: "nav-switch", file: "nav-switch-test.mjs", args: ["--board", CYBER], why: "菜单栏切换不掉链（视图与 hash 同步）" },
   { name: "closed-groups-cyber", file: "closed-groups-test.mjs", args: ["--board", CYBER], why: "收口页表格与分组一一对应（大看板）" },
   { name: "closed-groups-practise", file: "closed-groups-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板，0 收口）" },
+  { name: "feature-planlist-cyber", file: "feature-planlist-test.mjs", args: ["--board", CYBER], why: "需求页「计划列表」总览表（大看板）" },
+  { name: "feature-planlist-practise", file: "feature-planlist-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
   { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },
