@@ -813,6 +813,10 @@ function workbenchBlock() {
       <label class="wb-mode-option"><input type="checkbox" data-wb-planner-reuse checked> 复用分析窗口（关掉 = 每次分析新开一个窗口，结论不受上一轮影响）</label>
       <span class="wb-planner-hint">并行时，「分析」会先交给一个窗口判断这批卡怎么分、会不会互相冲突；它回的计划不合法就自动回退到按区域分组。</span>
     </div>
+    <div class="workbench-rehearsal" data-wb-rehearsal-box>
+      <label class="wb-mode-option"><input type="checkbox" data-wb-rehearsal> 演练模式（对话窗口只回话，不动台账）</label>
+      <span class="wb-rehearsal-hint">勾上之后，交活的话术换成「只回应、别改 ledger.json」。claim / 派活 / 等回答 / 交还整条链路照跑，只是卡不会被真收口 —— 想反复看窗口的接活表现、又不愿意把数据跑废时用。默认关。</span>
+    </div>
     <div class="workbench-actions">
       <button type="button" class="btn" data-wb-analyze>分析</button>
       <button type="button" class="btn" data-wb-start disabled>开始执行</button>

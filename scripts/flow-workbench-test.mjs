@@ -1011,6 +1011,87 @@ console.log("\n[5q] 「执行台」是保留名：lane.key 起这个名字会被
   ok(plannerStill === "调度台", "分析窗口的名字没被改动", String(plannerStill));
 }
 
+console.log("\n[5r] 演练模式：只回话、不动台账；默认关");
+// 用户要「让对话窗口不要具体去执行，但做一个回应，好在看板里测窗口的反应效果」。
+// 这个开关只换 prompt，整条链路（claim / 派活 / 等回答 / release）照跑 ——
+// 否则演练就测不到真链路。默认必须关（默认开着会让人以为机器在干活）。
+{
+  const rehBox = await ev(`(function(){
+    var b = document.querySelector('[data-wb-rehearsal]');
+    var w = document.querySelector('[data-wb-rehearsal-box]');
+    return b ? { exists:true, checked:b.checked, visible: w ? getComputedStyle(w).display !== 'none' : false } : { exists:false };
+  })()`);
+  ok(rehBox && rehBox.exists, "「演练模式」勾选框在页面上");
+  ok(rehBox && rehBox.checked === false, "默认关（= 真执行）", String(rehBox && rehBox.checked));
+  ok(rehBox && rehBox.visible === true, "串行/并行都看得见（不像分析窗口只在并行显示）");
+
+  const rehIds = await ev(`(window.__wb.candidate || []).filter(function(c){ return c.state === 'ready'; }).map(function(c){ return c.id; }).slice(0,1)`);
+  if (!rehIds || !rehIds.length) {
+    ok(true, "[跳过] 没有可开工的卡，无法验证演练话术");
+  } else {
+    await ev(`document.querySelector('[data-wb-clear]').click(); 1`);
+    await wait(400);
+    await ev(`window.__wb.run = false; window.__wb.stop = false; window.__wb.inflight = {}; 1`);
+    await ev(`(function(){
+      var b = document.querySelector('[data-wb-rehearsal]');
+      b.checked = true; b.dispatchEvent(new Event('change', {bubbles:true}));
+      window.__wbReh = { asked: [] };
+      var orig = window.fetch.bind(window);
+      window.fetch = function(url, opts){
+        if (String(url).indexOf('/ops-board/ask') === 0 && opts && opts.method === 'POST'){
+          var body = JSON.parse(opts.body);
+          window.__wbReh.asked.push({ askId: body.askId, question: body.question });
+          return Promise.resolve({ok:true, json:function(){return Promise.resolve({ok:true, askId:body.askId});}});
+        }
+        return orig(url, opts);
+      };
+      return 1;
+    })()`);
+    await ev(`document.querySelector('input[name=wb-mode][value=serial]').checked=true;
+      document.querySelector('input[name=wb-mode][value=serial]').dispatchEvent(new Event('change',{bubbles:true})); 1`);
+    await wait(200);
+    await ev(`window.__wb.dragPool = ${JSON.stringify(rehIds)}; 1`);
+    await ev(`document.querySelector('[data-wb-analyze]').dispatchEvent(new MouseEvent('click',{bubbles:true})); 1`);
+    for (let i = 0; i < 20; i++) { await wait(250); if (await ev(`(window.__wb.order||[]).length > 0`)) break; }
+    await ev(`document.querySelector('[data-wb-start]').dispatchEvent(new MouseEvent('click',{bubbles:true})); 1`);
+    let rehSeen = 0;
+    const rehDl = Date.now() + 15000;
+    while (Date.now() < rehDl) {
+      await wait(400);
+      const n = await ev(`(function(){var a=window.__wbReh.asked;var c=0;a.slice(${rehSeen}).forEach(function(x){window.postMessage({type:'ops-board/answer',askId:x.askId,ok:true,text:'演练回应：收到，先说打算怎么做。',by:'t'},'*');c++;});return c;})()`);
+      rehSeen += n;
+      if (await ev(`window.__wb.run === false`)) break;
+    }
+    const rehSum = JSON.parse(await ev(`JSON.stringify({ asked: window.__wbReh.asked.map(function(a){ return { q: a.question }; }) })`));
+    ok(rehSum.asked.length >= 1, "演练下仍照常发 ask（链路没被短路，否则测不到真链路）", rehSum.asked.length + " 次");
+    ok(rehSum.asked.every((a) => /演练模式：只回应，不要真执行/.test(a.q)),
+      "prompt 带「只回应，不要真执行」", rehSum.asked.length + "/" + rehSum.asked.length);
+    ok(rehSum.asked.every((a) => !/这是真实执行，不是分析建议/.test(a.q)),
+      "不再出现「这是真实执行」那句（否则窗口会去改台账）");
+    // 顺带盯住一条老 bug：prompt 里必须出现**真正的卡编号**。
+    // 以前 cleanId 是从标题里 split("·") 猜的，而 itemTitle 返回的就是标题，
+    // 于是「卡片 id：FileCopy2 复制目录必定失败…」—— 窗口拿它定位不到卡。
+    ok(rehSum.asked.every((a) => rehIds.some((id) => a.q.indexOf(id) > -1)),
+      "prompt 里点了名（真正的卡编号，不是标题）",
+      rehSum.asked.map((a) => (a.q.match(/[A-Z]+-\d+/) || ["(无编号)"])[0]).join(","));
+
+    // 关掉演练 → 回到真执行话术
+    await ev(`(function(){
+      document.querySelector('[data-wb-clear]').click();
+      var b = document.querySelector('[data-wb-rehearsal]');
+      b.checked = false; b.dispatchEvent(new Event('change', {bubbles:true}));
+      window.__wb.run = false; window.__wb.inflight = {};
+      return 1;
+    })()`);
+    await wait(400);
+    const offState = await ev(`(function(){
+      var b = document.querySelector('[data-wb-rehearsal]');
+      return { checked: b.checked };
+    })()`);
+    ok(offState && offState.checked === false, "关掉后勾选框回到未选", JSON.stringify(offState));
+  }
+}
+
 console.log("\n[6] 服务没崩");
 ok(!/Error|throw/.test(stderr), "stderr 干净", stderr.slice(0, 120) || "(空)");
 

@@ -471,6 +471,13 @@ tbody tr:hover{background:var(--surface)}
 .workbench-planner{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;font-family:var(--sans);font-size:11.5px}
 .workbench-controls:not(:has(input[name=wb-mode][value=parallel]:checked)) .workbench-planner{display:none}
 .wb-planner-hint{color:var(--muted);font-size:10.5px;line-height:1.5;flex:1 1 320px}
+/* 演练模式：串行/并行都可能有，所以不像 .workbench-planner 那样按模式隐藏。
+   勾上时整行描个边，提醒「现在跑的是演练，卡不会被真收口」—— 忘了关的人
+   会以为机器在干活，其实什么都没做。 */
+.workbench-rehearsal{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;font-family:var(--sans);font-size:11.5px;padding:5px 8px;border:1px dashed var(--rule2);border-radius:3px}
+.workbench-rehearsal:has(input[data-wb-rehearsal]:checked){border-color:var(--red);background:var(--surface-hover)}
+.workbench-rehearsal:has(input[data-wb-rehearsal]:checked) label{color:var(--red2);font-weight:700}
+.wb-rehearsal-hint{color:var(--muted);font-size:10.5px;line-height:1.5;flex:1 1 320px}
 /* 分析窗口出来的计划：可读地列出它怎么分的，以及是「AI 分的」还是「回退的」 */
 .wb-plan-note{font-family:var(--sans);font-size:11px;color:var(--muted);line-height:1.6;margin:0 0 8px;padding:6px 8px;border-left:2px solid var(--rule2);background:var(--surface-soft)}
 .wb-plan-note b{color:var(--ink);font-weight:600}

@@ -183,7 +183,19 @@ console.log("[1] 串行：从备选里排若干张（最多 3 张），验证逐
   await h.inject();
   const picked = await selectReady(h.ev, 99);   // 99 = 备选全要
   const planned = await analyzeThenStart(h.ev, "parallel");
-  await wait(26000);
+  // 不写死等待时间：路数 = 区域前缀数，某个区域有多张卡时要一张一张轮，
+  // 轮数随台账变化。固定 26s 在多一张同区卡的时候就会假红（数据变了，不是坏了）。
+  // 改成「等到全部 done，最多 60s」。
+  const paraDeadline = Date.now() + 60000;
+  while (Date.now() < paraDeadline) {
+    await wait(1000);
+    const allDone = await h.ev(`(function(){
+      var n = document.querySelectorAll('[data-wb-steps] .wb-step-done').length;
+      var t = document.querySelectorAll('[data-wb-steps] .wb-step').length;
+      return t > 0 && n === t;
+    })()`);
+    if (allDone) break;
+  }
   const paraDone = await h.ev(`document.querySelectorAll('[data-wb-steps] .wb-step-done').length`);
   const paraIds = (await h.ev(`Array.prototype.map.call(document.querySelectorAll('[data-wb-steps] .wb-step-id'),function(s){return s.textContent;})`)) || [];
   const lanes = await h.ev(`document.querySelectorAll('[data-wb-steps] .wb-lane').length`);

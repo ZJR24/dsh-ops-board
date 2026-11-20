@@ -1377,6 +1377,36 @@
     return box ? !!box.checked : true;
   }
 
+  // 演练模式：勾上之后，交给对话窗口的话术变成「只回一句话、不要动台账」。
+  //
+  // 为什么要有这个：工作台是真的会改台账的（prompt 里明确要求把 status 收到
+  // 收口阶段）。想单纯看「窗口怎么接活、怎么复用、名字长什么样、多路怎么并发」
+  // 的时候，用真数据跑一遍会把卡全收口掉 —— 试一次废一次数据。
+  // 这个开关让同一套链路照跑（claim / 派活 / 等回答 / release 全都一样），
+  // 只有 prompt 里那句「真的去做」被换成「只回话」。
+  //
+  // 默认**关**（= 真执行）。演练是偶尔的需求，真执行是日常；
+  // 默认开着迟早会有人以为机器在干活、其实什么都没做。
+  function wbRehearsalOn() {
+    var box = WB.el && WB.el.querySelector("[data-wb-rehearsal]");
+    return box ? !!box.checked : false;
+  }
+
+  // 拼「请只做个回应、别动台账」那一段。三个执行入口（逐张 / 整批 / 路批量）共用，
+  // 免得三处话术各写一份、改一处漏两处。
+  function wbRehearsalNote(ids, ledgerPath) {
+    var list = (ids && ids.length ? ids : []).join("、") || "（本批）";
+    return (
+      "【演练模式：只回应，不要真执行】\n" +
+      "这一轮是看板在测试对话窗口的接活表现，**不要修改任何文件**，尤其不要动 ledger.json。\n" +
+      "请只做一件事：用两三句话回应你收到了哪些卡（" + list + "），" +
+      "并说说你打算怎么处理它们（顺序 / 会不会互相冲突）。\n" +
+      "说完就结束，不要读改台账、不要跑命令、不要声称已经把状态改好了 ——\n" +
+      "这次要验的是「窗口有没有接住活、回没回话」，不是「卡有没有被收口」。\n" +
+      (ledgerPath ? "（台账在 " + ledgerPath + "\\ledger.json，本轮不用碰它。）\n" : "")
+    );
+  }
+
   // 有没有条件问分析窗口：得有 Harness 环境，且校验器已就位。
   function wbPlanAskEnabled() {
     return !!harnessEnv() && !!wbPlanner();
@@ -1735,8 +1765,12 @@
         return "- " + c.id + " " + (c.title || "");
       }).join("\n");
       var ledgerPath = harnessEnv() ? harnessEnv().dir : "";
-      var text =
-        "自动工作台正在并行推进你负责看板的多条队列之一——本条队列是「" + (lane.prefix || "未分区域") +
+      var rehearsal = wbRehearsalOn();
+      var text = rehearsal
+        ? wbRehearsalNote(batchCards.map(function (c) { return c.id; }), ledgerPath) +
+          "\n本条队列是「" + (lane.prefix || "未分区域") + "」，共 " + lane.cards.length +
+          " 张，本次交给你 " + batchCards.length + " 张：\n" + listText
+        : "自动工作台正在并行推进你负责看板的多条队列之一——本条队列是「" + (lane.prefix || "未分区域") +
         "」（同一条数据链路/同一块地），共 " + lane.cards.length + " 张卡，本次交给你 " + batchCards.length + " 张。\n" +
         "你可以自主决定这 " + batchCards.length + " 张的处理顺序（也可以按你的判断同时推进）。\n" +
         "其它队列由别的窗口同时在做，你**只管这一条队列**，不要去动其它队列的卡。\n\n" +
@@ -1896,7 +1930,7 @@
             if (!WB.run) return;
             setTimeout(function () { if (WB.run) workbenchPump(); }, 400);
           });
-        }, wbConvKey(id));
+        }, wbConvKey(id), id);
       });
     }
 
@@ -1983,16 +2017,23 @@
   // 是每路一条对话）。串行没有「路」，一律落到固定的「执行台」那条会话 ——
   // 以前缺省空 → 回落成卡 id，于是串行跑 N 张卡就新开 N 个窗口，
   // 用户问「除了调度台，其他对话会复用吗」时的答案就是「不会」，这正是要修的。
-  function workbenchAsk(itemTitle, done, convKey) {
+  // itemTitle：卡片标题（不带 id）。
+  // cardId    ：真正的卡片编号。以前这里没有这个参数，只靠
+  //             `itemTitle.split("·")[0]` 去猜 —— 而 itemTitle() 返回的**就是标题**，
+  //             标题里没有「·」时 cleanId 等于整条标题，prompt 里就写成
+  //             「卡片 id：FileCopy2 复制目录必定失败…」，窗口拿这个去 ledger.json
+  //             里根本定位不到卡。现在由调用方把 id 明确传进来。
+  function workbenchAsk(itemTitle, done, convKey, cardId) {
     if (!harnessEnv()) { done({ ok: false, error: "要在 Harness 里打开才能问 AI" }); return; }
     var env = harnessEnv();
     var ledgerPath = env && env.dir ? env.dir : "";
     // 会话键：有 convKey 就用它（并行=每路一条独立对话）；串行=固定「执行台」。
     var convTitle = convKey || WB_EXEC_KEY;
-    // itemTitle 形如「OPS-022 · 标题」，前半就是卡 id，供它去 ledger.json 里定位。
-    var cleanId = String(itemTitle || "").split("·")[0].trim() || "";
-    var text =
-      "自动工作台正在逐张处理队列你负责的看板卡【" + itemTitle + "】。\n" +
+    var cleanId = String(cardId || "").trim() || String(itemTitle || "").split("·")[0].trim() || "";
+    var rehearsal = wbRehearsalOn();
+    var text = rehearsal
+      ? wbRehearsalNote([cleanId], ledgerPath) + "\n这张卡是：【" + itemTitle + "】"
+      : "自动工作台正在逐张处理队列你负责的看板卡【" + itemTitle + "】。\n" +
       "这是真实执行，不是分析建议：请实际去处理这条卡并更新台账，让队列能往下走。\n\n" +
       "台账文件在：" + (ledgerPath || "（当前看板目录）") + "\\ledger.json（卡片 id：" + cleanId + "）。\n" +
       "要求：\n" +
