@@ -36,6 +36,7 @@ import {
   stageBlock,
   stageBoard,
   closedBoard,
+  closedGroupsOf,
   shouldRenderStageSection,
   lanesWithClosed,
   legend,
@@ -476,57 +477,59 @@ function viewLane(config, ledger, lane) {
 </section>`;
 }
 
-// 「问题修复」只放还在推进的条目（未收口）；收口的都在这一页，跟原版一样：
-// 原版这一页是「已修复 / 已关闭 / 暂停」，两页的内容互不重叠。
-// 页首那块合并状态板是第一模块（2026-11-19）：左「已收口 N」，右边把三个车道的
-// 已收口阶段排成一排（已解决 / 已上线 / 暂停 / 已解除 / 已知并接受），点一格只看那一组；
-// 某个状态在这一版台账里是 0，就只显示数字不给链接（分组按需渲染，指过去会是死链）。
-// 第二模块才是「已解决」—— 需求的收口条目（原本在总览的「需求一览」，挪到这里并改名）。
+// 「问题修复」只放还在推进的条目（未收口）；收口的都在这一页。
+//
+// 2026-11-20 三十四改：**分组与顶部表格共用 parts.mjs 的 `closedGroupsOf()`**，
+// 所以「表格里的类别」和「页面上的分组标题」必然一一对应（用户报的正是这个不一致）。
+// 四组的定义（已解决 / 已上线 / 已暂停 / 其他）见 CLOSED_GROUPS 那段注释。
+//
+// 三件用户明确要求的事都在那份定义里：
+//   · 新增「已暂停」类别；
+//   · 风险的「已知并接受」并进暂停；
+//   · 「已解除」去掉（当成一种暂停，并到同一组）。
 function viewClosed(config, ledger) {
-  const featureLane = laneByKey(config, "feature");
-  const groups = config.lanes
-    .filter((lane) => lane.key !== "feature")
-    .map((lane) => {
-      const items = sortItems(lane, itemsOfLane(ledger, lane.key).filter((i) => isClosedLaneItem(lane, i)));
-      if (!items.length) return "";
-      const stages = lane.stages.filter((s) => !s.open);
-      const kinds = stages
-        .map((s) => `${esc(s.label)} ${items.filter((i) => s.statuses.includes(i.status)).length}`)
+  const groups = closedGroupsOf(config, ledger);
+  const body = groups
+    .map((g) => {
+      // 每组的 meta 写清「这里面各状态各几条」，让合并后的组仍然可解释。
+      //
+      // ⚠️ 只列**这一组自己的名字覆盖不到**的状态：一个问题车道的「已解决」组里
+      // 有 fixed/closed 两个状态，它们都叫「已解决」，标题已经写了，再列
+      // 「已解决 30 · 已解决 3」纯属重复（第一版就是这样）。
+      // 只在状态名和组名不同的时候才点名 —— 那样合并出来的组才有解释力
+      // （「已暂停」下面会写「暂停 3 · 已解除 1 · 已知并接受 1」）。
+      const kinds = g.statuses
+        .map((st) => {
+          const n = g.items.filter((x) => x.item.status === st).length;
+          if (!n) return "";
+          // 用状态在**它自己车道**里的显示名（「已解除」而不是裸 resolved）
+          const hit = g.items.find((x) => x.item.status === st);
+          const lane = laneByKey(config, hit.lane.key);
+          const stage = lane && lane.stages.find((s) => s.statuses.includes(st));
+          const label = (stage && stage.label) || (lane && lane.statusLabels && lane.statusLabels[st]) || st;
+          if (label === g.label) return ""; // 和组名一样就不重复
+          return `${esc(label)} ${n}`;
+        })
+        .filter(Boolean)
         .join(" · ");
-      const secKey = "closed-" + lane.key;
-      return `<section class="detail-group" id="stage-${lane.key}-closed">
-  ${sectionHead({ title: esc(lane.label) + " · 已收口", meta: `${kinds} · 共 ${items.length} 项`, key: secKey })}
-  <div data-fold-body="${esc(secKey)}">${items.map((i) => itemCard(config, lane, i, { collapsed: true })).join("")}</div>
+      const meta = kinds ? `${kinds} · 共 ${g.items.length} 项` : `共 ${g.items.length} 项`;
+      return `<section class="detail-group" id="${g.id}">
+  ${sectionHead({ title: esc(g.label), meta, key: "closed-" + g.key })}
+  <div data-fold-body="${esc("closed-" + g.key)}">${g.items
+        .map((x) => itemCard(config, x.lane, x.item, { collapsed: true }))
+        .join("")}</div>
 </section>`;
     })
-    .filter(Boolean)
     .join("");
 
-  // 已解决：需求的收口条目（已上线 / 暂停等已收口阶段），作为第一模块。
-  let solved = "";
-  if (featureLane) {
-    const items = sortItems(featureLane, itemsOfLane(ledger, featureLane.key).filter((i) => isClosedLaneItem(featureLane, i)));
-    if (items.length) {
-      const kinds = featureLane.stages
-        .filter((s) => !s.open)
-        .map((s) => `${esc(s.label)} ${items.filter((i) => s.statuses.includes(i.status)).length}`)
-        .join(" · ");
-      solved = `<section class="detail-group" id="stage-feature-closed">
-  ${sectionHead({ title: "已解决", meta: `${kinds} · 共 ${items.length} 项`, key: "closed-feature" })}
-  <div data-fold-body="closed-feature">${items.map((i) => itemCard(config, featureLane, i, { collapsed: true })).join("")}</div>
-</section>`;
-    }
-  }
-
-  const emptyState = (!solved && !groups) ? `<p class="stage-empty">还没有已收口的条目。</p>` : "";
+  const emptyState = groups.length ? "" : `<p class="stage-empty">还没有已收口的条目。</p>`;
 
   return `<section class="view" data-view="closed" id="${viewId("closed")}">
   <div class="details-main">
     <div class="kicker">已修复 / 已关闭 / 暂停</div>
     <h1 class="details-title">收口记录</h1>
     ${closedBoard(config, ledger)}
-    ${solved}
-    ${groups}
+    ${body}
     ${emptyState}
   </div>
 </section>`;

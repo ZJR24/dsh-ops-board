@@ -552,33 +552,114 @@ export function stageBoard(lane, items, closedLanes) {
 </div>`;
 }
 
-// 收口页顶部那块合并状态板：把每个车道的每个「已收口」阶段排成一格。
-// 和车道页的阶段板同一个组件、同一套样式，只是左侧大数换成「已收口」总数，
-// 右边跨车道铺开（已解决 / 已上线 / 暂停 / 已解除 / 已知并接受……随配置自动增减）。
+// 「已收口」在页面上分成哪几组 —— **表格和分组共用这一份定义**。
 //
-// 格子只在那一格有数时才做成链接：收口页的分组是按需渲染的（某个车道没有收口条目
-// 就不出现），指过去就是死链 —— verify-board 第 7 条会报。
-// 同一车道的两个收口阶段指向同一个分组（需求页的「已上线」「暂停」都归「已解决」那组），
-// 所以点任一格筛出来的都是整组，不是单个状态。
-export function closedBoard(config, ledger) {
-  const cells = [];
-  let total = 0;
+// 2026-11-20 用户定（原话：「表格里的类别和页面上的类别没有完全对应的标题」）：
+//   ① 增加一个「已暂停」类别，把风险的「已知并接受」也并进来；
+//   ② 「已解除」去掉，当成一种暂停（并到同一组）；
+//   ③ 表格格子改成和页面分组**一一对应**，名字完全一样。
+//
+// 所以收口页固定 **4 组**，顺序即页面顺序、也是表格格子的顺序：
+//
+//   已解决  ← 问题车道的全部已收口状态（fixed / closed）
+//   已上线  ← 需求车道的 shipped
+//   已暂停  ← 需求的 paused + 风险的 resolved(已解除) + accepted(已知并接受)
+//   其他    ← 兜底：配置里新增了、这里没列到的已收口状态，一律进这组，
+//             免得「台账里有一条、页面上却找不到」（那是最难查的那种不一致）
+//
+// 每一项都是 { key, label, statuses, laneKeys }：
+//   statuses = 算进这一组的状态集合（跨车道，所以不按 lane 限）
+//   laneKeys = 这一组收哪几个车道的条目（决定卡片用哪个 lane 的配置去渲染）
+export const CLOSED_GROUPS = [
+  {
+    key: "solved",
+    label: "已解决",
+    laneKeys: ["bug"],
+    statuses: ["fixed", "closed"],
+    id: "stage-bug-closed",
+  },
+  {
+    key: "shipped",
+    label: "已上线",
+    laneKeys: ["feature"],
+    statuses: ["shipped"],
+    id: "stage-feature-closed",
+  },
+  {
+    key: "paused",
+    label: "已暂停",
+    laneKeys: ["feature", "risk"],
+    // 需求的「暂停」+ 风险的「已解除」「已知并接受」都算暂停
+    statuses: ["paused", "resolved", "accepted"],
+    id: "stage-risk-closed",
+  },
+];
+
+// 已归入上面三组的状态集合（算「其他」时用它排除）
+const CLAIMED_STATUSES = new Set(CLOSED_GROUPS.flatMap((g) => g.statuses));
+
+/**
+ * 把台账里的已收口条目分到各组。
+ * 返回 [{ ...group, items: [{ lane, item }] }]，**只含非空的组**（页面按需渲染）。
+ * 「其他」组只在真有漏网状态时才出现。
+ */
+export function closedGroupsOf(config, ledger) {
+  const out = [];
+  const buckets = new Map(CLOSED_GROUPS.map((g) => [g.key, []]));
+
   for (const lane of config.lanes) {
-    const items = itemsOfLane(ledger, lane.key).filter((i) => isClosedLaneItem(lane, i));
-    total += items.length;
-    for (const st of lane.stages.filter((s) => !s.open)) {
-      const n = items.filter((i) => st.statuses.includes(i.status)).length;
-      const body = `<b>${n}</b><span>${esc(st.label)}</span>`;
-      cells.push(
-        n
-          ? `<a class="stage-board-cell" href="#stage-${lane.key}-closed">${body}</a>`
-          : `<span class="stage-board-cell is-static">${body}</span>`
+    for (const item of itemsOfLane(ledger, lane.key)) {
+      if (!isClosedLaneItem(lane, item)) continue;
+      // 找这一条该进哪一组：先按状态精确匹配
+      const g = CLOSED_GROUPS.find(
+        (x) => x.laneKeys.includes(lane.key) && x.statuses.includes(item.status)
       );
+      if (g) {
+        buckets.get(g.key).push({ lane, item });
+        continue;
+      }
+      // 兜底：配置里新增的已收口状态，没被上面任何一组认领
+      if (!buckets.has("other")) buckets.set("other", []);
+      buckets.get("other").push({ lane, item });
     }
   }
+
+  for (const g of CLOSED_GROUPS) {
+    const items = buckets.get(g.key) || [];
+    if (items.length) out.push({ ...g, items });
+  }
+  const other = buckets.get("other") || [];
+  if (other.length) {
+    out.push({
+      key: "other",
+      label: "其他已收口",
+      laneKeys: [...new Set(other.map((x) => x.lane.key))],
+      statuses: [...new Set(other.map((x) => x.item.status))],
+      id: "stage-closed-other",
+      items: other,
+    });
+    if (!CLAIMED_STATUSES.size) void 0; // keep linters quiet; the set is used above
+  }
+  return out;
+}
+
+// 收口页顶部那块合并状态板：**格子与页面分组一一对应**。
+// 用 closedGroupsOf 的同一份结果生成，所以名字、顺序、数量必然一致 ——
+// 这正是用户报的那个「表格里的类别和页面上的类别没有完全对应的标题」。
+export function closedBoard(config, ledger) {
+  const groups = closedGroupsOf(config, ledger);
+  const total = groups.reduce((n, g) => n + g.items.length, 0);
+  const cells = groups.map((g) => {
+    const body = `<b>${g.items.length}</b><span>${esc(g.label)}</span>`;
+    return `<a class="stage-board-cell" href="#${g.id}">${body}</a>`;
+  });
+  // 一条已收口都没有：给一个静态 0，别让表塌成一行没有格子的空表
+  const table = cells.length
+    ? cells.join("")
+    : `<span class="stage-board-cell is-static"><b>0</b><span>已收口</span></span>`;
   return `<div class="stage-board">
   <div class="stage-board-total"><span class="stage-board-num">${total}</span><span class="stage-board-label">已收口</span></div>
-  <div class="stage-board-table" style="grid-template-columns:repeat(${cells.length},1fr)">${cells.join("")}</div>
+  <div class="stage-board-table" style="grid-template-columns:repeat(${Math.max(cells.length, 1)},1fr)">${table}</div>
 </div>`;
 }
 

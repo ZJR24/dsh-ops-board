@@ -81,32 +81,26 @@ await send("Page.navigate", { url: B + "/#view-lane-bug" });
 await wait(2400);
 const tagInfo = JSON.parse(await ev(`JSON.stringify((function(){
   var cards = Array.prototype.slice.call(document.querySelectorAll('.view.is-active details.card'));
-  var withFileEv = 0, withTag = 0, tagInTitle = 0, tagRightOfTitle = 0, dupTag = 0;
+  var withFileEv = 0, withTag = 0, tagInIdLine = 0, dupTag = 0;
   var samples = [];
   cards.forEach(function(card){
-    var fileEvRows = card.querySelectorAll('.evidence .ev-kind:not(.is-blank)').length;
     var fileBlankCells = card.querySelectorAll('.ev-kind.is-blank').length;
     var tags = card.querySelectorAll('.card-file-tag');
-    var h3 = card.querySelector('h3');
+    // 标签的归属行 = summary 里的 .id（编号行），不是 h3
+    var idLine = card.querySelector('summary > .id');
     if (fileBlankCells > 0) withFileEv++;
     if (tags.length) withTag++;
     if (tags.length > 1) dupTag++;
-    if (tags.length === 1 && h3 && h3.contains(tags[0])) tagInTitle++;
-    if (tags.length === 1 && h3) {
-      var tr = tags[0].getBoundingClientRect(), hr = h3.getBoundingClientRect();
-      // 「在右侧」= 标签起点在标题行中点之后
-      if (tr.left > hr.left + hr.width / 2) tagRightOfTitle++;
-    }
+    if (tags.length === 1 && idLine && idLine.contains(tags[0])) tagInIdLine++;
     if (samples.length < 3 && tags.length) {
       samples.push({ id: card.id, tagText: tags[0].textContent.trim(), fileRows: fileBlankCells });
     }
   });
   // 整页里还有没有「文件」贴在证据行上的
-  var stillInline = document.querySelectorAll('.view.is-active .evidence .ev-kind:not(.is-blank)').length;
   var inlineTexts = Array.prototype.map.call(document.querySelectorAll('.view.is-active .evidence .ev-kind:not(.is-blank)'), function(e){ return e.textContent.trim(); });
   return {
     cards: cards.length, withFileEv: withFileEv, withTag: withTag,
-    tagInTitle: tagInTitle, tagRightOfTitle: tagRightOfTitle, dupTag: dupTag,
+    tagInIdLine: tagInIdLine, dupTag: dupTag,
     stillInlineFile: inlineTexts.filter(function(t){ return t === '文件'; }).length,
     otherKinds: inlineTexts.filter(function(t){ return t !== '文件'; }).slice(0,6),
     samples: samples
@@ -115,10 +109,12 @@ const tagInfo = JSON.parse(await ev(`JSON.stringify((function(){
 ok(tagInfo.cards > 0, "车道页有卡片", tagInfo.cards + " 张");
 ok(tagInfo.withFileEv > 0, "其中确实有带文件证据的卡", tagInfo.withFileEv + " 张");
 ok(tagInfo.withTag === tagInfo.withFileEv && tagInfo.withFileEv > 0,
-  "每张有文件证据的卡都在标题行挂了「文件」标签", tagInfo.withTag + "/" + tagInfo.withFileEv);
-ok(tagInfo.tagInTitle === tagInfo.withTag, "标签确实在 h3 标题行里", tagInfo.tagInTitle + "/" + tagInfo.withTag);
-ok(tagInfo.tagRightOfTitle === tagInfo.withTag, "标签在标题行的右侧（不是跟在标题文字后面）",
-  tagInfo.tagRightOfTitle + "/" + tagInfo.withTag);
+  "每张有文件证据的卡都挂了「文件」标签", tagInfo.withTag + "/" + tagInfo.withFileEv);
+// ⚠️ 标签最终位置是**编号行**（紧跟 FEAT-901 之后），不是 h3 标题行 ——
+// 这里原来的两条断言（"在 h3 里" / "在标题行右侧"）是三十一改的中间版本留下的，
+// 三十四改挪走之后就该改。深度位置验证在 file-tag-pos-test.mjs，
+// 这条只粗验「在编号行里」，两个测试分工不重复。
+ok(tagInfo.tagInIdLine === tagInfo.withTag, "标签挂在编号行（.id）里", tagInfo.tagInIdLine + "/" + tagInfo.withTag);
 ok(tagInfo.dupTag === 0, "一张卡最多一个「文件」标签（不再重复贴）", "重复 " + tagInfo.dupTag + " 张");
 ok(tagInfo.stillInlineFile === 0, "证据行里不再贴「文件」标签", "残留 " + tagInfo.stillInlineFile + " 处");
 // 其他类型的标签（命令 / 提交 / 实测值 / 链接）必须仍然留着。

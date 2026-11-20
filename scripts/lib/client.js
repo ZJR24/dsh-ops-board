@@ -425,9 +425,23 @@
       return;
     }
     var href = a.getAttribute("href") || "";
+    // 导航项（`#view-xxx`）交给 hashchange 走 route()。这里**只兜「点了没反应」那一种**：
+    // hash 已经等于目标、浏览器不会再发 hashchange，但当前激活的却**不是**那个视图
+    // （典型场景：阶段筛选先把视图切走了、hash 没跟上）。这时手动补一次切换。
+    if (href.indexOf("#view-") === 0) {
+      if (location.hash === href) {
+        var want = href.slice(6); // 去掉 "#view-"
+        var act = document.querySelector(".view.is-active");
+        if (!act || act.getAttribute("data-view") !== want) {
+          e.preventDefault();
+          show(want, true);
+          saveRoute(href);
+        }
+      }
+      return;
+    }
     if (href.length < 2 || location.hash !== href) return;
     var target = decodeURIComponent(href.slice(1));
-    if (target.indexOf("view-") === 0) return; // 导航自己处理
     e.preventDefault();
     var v = ITEM_VIEW[target];
     if (v) show(v);
@@ -815,10 +829,29 @@
     }
 
     // 总览页左栏点某个阶段：先切到它所在的那一页，再筛。
+    //
+    // ⚠️ 这里必须**同时把 hash 同步过去**（2026-11-20 修「菜单栏有时点了没切换」）。
+    // 原来只调 show()，hash 还停在别处，于是：
+    //   · 视图已经是 A、hash 却是 B；
+    //   · 用户接着点导航里的 B —— location.hash 本来就等于 "#view-b"，
+    //     浏览器**不会**触发 hashchange，点击处理器里那句
+    //     `location.hash !== href` 又直接 return，结果**点了什么都不发生**。
+    // 用 replaceState 而不是改 location.hash：不产生额外的 hashchange 回环，
+    // 也就是不会和这次筛选打架（route() 会把筛选状态清掉）。
     var view = main.closest(".view");
     if (view) {
       var viewKey = view.getAttribute("data-view");
       if (viewKey && !view.classList.contains("is-active")) show(viewKey);
+      // 只在「当前 hash 不是这个视图」时才动 URL，避免无谓的 replaceState
+      var wantHash = "#" + view.id;
+      if (viewKey && location.hash !== wantHash) {
+        try {
+          history.replaceState(null, "", wantHash);
+        } catch (e) {}
+        // replaceState 不触发 hashchange，落点要自己记一次，
+        // 否则刷新后恢复的还是旧落点。
+        saveRoute(wantHash);
+      }
     }
     return true;
   }

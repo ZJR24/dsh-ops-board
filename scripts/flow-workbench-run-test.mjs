@@ -44,21 +44,37 @@ async function launchPhase(suffix, port) {
     for (const st of lane.stages || []) { if (!st.open) { CLOSED[lane.key] = st.statuses[0]; break; } }
   }
   const closedSet = new Set();
+  // 模拟「Agent 真把卡收口了」。
+  //
+  // ⚠️ 判据不能只看 plan 里的 running（2026-11-20 修一个间歇性假红 5/6）：
+  // 一张卡可能在同一轮里**被领走又交还**，中间只隔几百毫秒；这个 setInterval
+  // 每 120ms 扫一次，扫到与否全看运气。漏扫一次 → 卡的状态没变 →
+  // 同区域下一张（OPS-902 之于 OPS-901）永远 claim 不到 → 最后卡在 5/6。
+  //
+  // 改成两个**确定性**来源：
+  //   ① 页面已经 ask 过的卡（`window.__wbAsked` 里记着，见 inject()）——
+  //      它们走完了整条链路，一定要收口；
+  //   ② plan 里正在跑的（兜住「已领未交还」那一刻）。
+  // 不再依赖采样时机。
+  let askedSnap = null; // () => Promise<string[]>，由 launchPhase 之后赋值
   const closer = setInterval(async () => {
     try {
+      const fromPage = askedSnap ? await askedSnap() : [];
       const plan = await fetch(B + "/api/flow/plan").then((r) => r.json());
-      const running = (plan.runnable || []).filter((x) => x.state === "running");
-      for (const r of running) {
-        if (closedSet.has(r.id)) continue;
-        const meta = ITEM_META[r.id];
+      const running = (plan.runnable || []).filter((x) => x.state === "running").map((x) => x.id);
+      const candidates = [...new Set([...running, ...(fromPage || [])])];
+      for (const id of candidates) {
+        if (closedSet.has(id)) continue;
+        const meta = ITEM_META[id];
         if (!meta || !CLOSED[meta.lane]) continue;
         const l = JSON.parse(readFileSync(LEDGER, "utf8"));
-        const it = l.items.find((i) => i.id === r.id);
-        if (!it) return;
+        const it = l.items.find((i) => i.id === id);
+        if (!it) { closedSet.add(id); continue; }
+        if (it.status === CLOSED[meta.lane]) { closedSet.add(id); continue; }
         it.status = CLOSED[meta.lane];
         writeFileSync(LEDGER, JSON.stringify(l, null, 2), "utf8");
-        closedSet.add(r.id);
-        console.log("    [收口] " + r.id + " → " + CLOSED[meta.lane]);
+        closedSet.add(id);
+        console.log("    [收口] " + id + " → " + CLOSED[meta.lane]);
       }
     } catch {}
   }, 120);
@@ -89,6 +105,18 @@ async function launchPhase(suffix, port) {
     setInterval(function(){ var a=window.__wbAsked; if(!a.length)return; var d=window.__wbReplied||[]; for(var i=0;i<a.length;i++){var askId=a[i].askId; if(d.indexOf(askId)>-1)continue; d.push(askId); window.postMessage({type:'ops-board/answer',askId:askId,text:'「'+a[i].__item+'」已处理并收口，结论完成。',error:''},window.location.origin);} window.__wbReplied=d; },600);
     1;
   })()`);
+
+  // 给 closer 一个「页面已经问过哪些卡」的取数口。
+  // 从 askId 反查卡号不可靠，直接从页面上的执行进度里读：
+  // `.wb-step-done` 的 id 就是「已经跑完的卡」—— 那正是该收口的集合。
+  askedSnap = async () => {
+    try {
+      const ids = await ev(`Array.prototype.map.call(document.querySelectorAll('[data-wb-steps] .wb-step-done'), function(s){ return s.getAttribute('data-wb-step'); })`);
+      return Array.isArray(ids) ? ids.filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  };
 
   const close = () => { clearInterval(closer); ws.close(); proc.kill(); srv.kill(); rmSync(TMP, { recursive: true, force: true }); };
   return { B, ev, inject, close, stderr: () => stderr };
@@ -139,12 +167,16 @@ async function analyzeThenStart(ev, mode) {
   if (disabled) throw new Error("分析按钮是 disabled —— 队列没排上卡");
   await ev(`document.querySelector('[data-wb-analyze]').click()`);
   let orderN = 0;
-  for (let i = 0; i < 60; i++) {
+  // 等分析结果。**并行模式下分析会真去问一次「分析窗口」**（三十四改之前是纯本地分组，
+  // 现在是 await 一次 LLM 往返），而 gate 里同时还有别的 Edge 在抢 CPU，
+  // 12 秒根本不够 —— 之前几次在 gate 里假红就是这个。
+  // 给 60 秒；超时仍然报错（那时是真出不来结果，不是慢）。
+  for (let i = 0; i < 300; i++) {
     await wait(200);
     orderN = (await ev(`(window.__wb.order||[]).length`)) || 0;
     if (orderN > 0) break;
   }
-  if (!orderN) throw new Error("分析 12 秒内没出结果");
+  if (!orderN) throw new Error("分析 60 秒内没出结果");
   const wbMode = await ev(`window.__wb.mode`);
   if (wbMode !== mode) throw new Error("分析后的执行模式是 " + wbMode + "，期望 " + mode);
   const planned = JSON.parse((await ev(`JSON.stringify((window.__wb.order||[]).map(function(o){return o.id;}))`)) || "[]");
