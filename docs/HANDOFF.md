@@ -2,6 +2,7 @@
 
 > 写给下一个窗口的自己。读完这份就能直接接手，不用翻历史对话。
 > 生成时间：2026-11-17 09:5x（Asia/Shanghai）
+> 更新：2026-11-20 **二十八改 —— 推送改走 `scripts/push-github.mjs`**。凭据一直在 Windows 凭据管理器里（target `GitHub - https://api.github.com/ZJR24`），以前却靠 `%TEMP%%\.gh-tok` 这个会被清理的临时文件，清一次就误判成「没有 token」。新增 `scripts/lib/wincred.ps1` + `scripts/push-github.mjs`：读凭据 → 比内容 → 走 API 推 → 记同步点，支持 `--dry-run`。三个坑见正文（blob 是 UTF-8 不是 UTF-16 / C# 要放进 Add-Type / 不能 git rev-list 比远端）。
 > 更新：2026-11-20 **二十七改 —— 演练模式 + 一批演练数据**。用户要「加一点测试数据，
 > 让对话窗口不要具体去执行但做一个回应，好在看板里测窗口的反应效果」。
 > ① cyber 板加了 5 张标题带「【演练】」的假卡（OPS-901/902/903 · FEAT-901 · RISK-901），
@@ -1109,6 +1110,50 @@ const claimsPath = resolve(argValue("claims") || join(ROOT, "flow-claims.json"))
 
 - **没做也不该做**：没有删掉「每批 1/2/3/5 张 + 整批全交」这个选择器 —— 它是用户门面上的功能，
   这次只是把它的**含义**从「划分窗口」纠正成「划分一条队列里的投喂节奏」。
+
+
+**2026-11-20 二十八改（推送改走 `scripts/push-github.mjs`，凭据从 Windows 凭据管理器读）**
+
+用户原话：
+> 「关于上传到 GitHub 这件事我已经重申过好多遍了。在 WINDOWS 凭证管理中是有的你没有把它加入到
+> 长期记忆里吗，把它加入到长期记忆，以后对话都不要再提这样的问题好吗」
+
+**问题不在"能不能推"，在于每次都用错凭据来源。** 以前推送靠 `$env:TEMP\.gh-tok` 这个临时文件，
+它被系统清理过一次，于是报「没有 token、推不了」，还去问了用户 —— 明明凭据管理器里一直有一条。
+
+#### 新增两个脚本（以后推 GitHub 只用它们）
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/lib/wincred.ps1` | `Get-GitHubToken`：从凭据管理器读 token（target `GitHub - https://api.github.com/ZJR24`），带按用户名兜底查找 |
+| `scripts/push-github.mjs` | 读 token → 比对内容 → 走 API 推送 → 记同步点。支持 `--dry-run` / `--repo` |
+
+```powershell
+node scripts\push-github.mjs --dry-run   # 只看会推什么
+node scripts\push-github.mjs             # 真推
+```
+
+#### 三个技术坑（都写进了 `lib/wincred.ps1` 和 `push-github.mjs` 的注释）
+
+1. **凭据 blob 是 UTF-8/ASCII 字节，不是 UTF-16。** 用 `Marshal.PtrToStringUni` 读出来是乱码
+   （长度还正好减半，看着像"读到 20 个字符"），请求 API 报
+   `Request headers must contain only ASCII characters`。必须 `Marshal.Copy` 成 `byte[]` 再 `Encoding.UTF8.GetString`。
+2. **C# 源码必须整体放进 `Add-Type -TypeDefinition`**，写在 `.ps1` 顶层会被当成命令解析，
+   报 `Missing using directive`。
+3. **不能 `git rev-list <remote>..HEAD`。** 历史上多次提交是**通过 API 建的**，远端 sha 和本地
+   sha 不同（内容一样、sha 不同），本地没有远端那个对象 → `fatal: Invalid revision range`。
+   改成按 blob sha 比对内容，不依赖共享历史。
+
+#### 还发现一处历史遗留：远端一直存的是 CRLF
+
+最初那版推送脚本「读文件成字符串再 base64」，把 CRLF 原样传了上去，而本地对象库是 LF。
+结果 11 个文件（`README.md`、`board.config.json`、`uitest.mjs`、`skills.json` …）**内容一样但 sha 不同**。
+现在一律走 `git ls-tree -r` 拿 blob sha + `git cat-file blob` 拿原始字节，这条不会再跑偏；
+本次推送顺手把远端那 11 个文件统一成了 LF。
+
+> **判据**：判断"内容是否相同"要比**归一化换行后**的字节，不能直接比文件 sha。
+
+**结果**：远端 `main` → `8fa4468`，`--dry-run` 现在输出「远端内容已经和本地一致」，本地与远端逐字节一致。
 
 
 **2026-11-20 二十七改（演练模式 + 一批演练数据；顺带修了 prompt 里「卡片 id」的老 bug）**
