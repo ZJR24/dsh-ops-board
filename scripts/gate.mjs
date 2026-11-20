@@ -46,6 +46,8 @@ const SUITES = [
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
   { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },
   { name: "section-fold-practise", file: "section-fold-test.mjs", args: ["--board", PRACTISE], why: "每个大标题模块都能收起（小看板）" },
+  { name: "masthead-size-cyber", file: "masthead-size-test.mjs", args: ["--board", CYBER], why: "报头大标题尺寸与各宽度不挤（大看板）" },
+  { name: "masthead-size-practise", file: "masthead-size-test.mjs", args: ["--board", PRACTISE], why: "报头大标题尺寸与各宽度不挤（小看板）" },
   { name: "stage-ask-cyber", file: "stage-ask-test.mjs", args: ["--board", CYBER], why: "「计划中」AI 入口 + 待处理表已搬到车道页" },
   { name: "stage-ask-practise", file: "stage-ask-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板，计划中同样是 0 项）" },
 

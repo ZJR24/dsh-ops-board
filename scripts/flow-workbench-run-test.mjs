@@ -185,8 +185,13 @@ console.log("[1] 串行：从备选里排若干张（最多 3 张），验证逐
   const planned = await analyzeThenStart(h.ev, "parallel");
   // 不写死等待时间：路数 = 区域前缀数，某个区域有多张卡时要一张一张轮，
   // 轮数随台账变化。固定 26s 在多一张同区卡的时候就会假红（数据变了，不是坏了）。
-  // 改成「等到全部 done，最多 60s」。
-  const paraDeadline = Date.now() + 60000;
+  //
+  // 上限给 150s，并且**按卡数算**：一个 A 区里 2 张卡就要多轮一轮，5 路 × 每路
+  // 若干张，加上每次 claim 重试 1.5s、每批之间 400ms，机器一忙（gate 里同时还有
+  // 别的 Edge 在跑）实际耗时会翻倍。60s 在单独跑时够、在 gate 里就不够 ——
+  // 这不是引擎的问题，是预算没留够。给足时间仍然不过才是真的没跑完。
+  const turnBudget = Math.max(60000, (picked.length + 1) * 20000);
+  const paraDeadline = Date.now() + turnBudget;
   while (Date.now() < paraDeadline) {
     await wait(1000);
     const allDone = await h.ev(`(function(){

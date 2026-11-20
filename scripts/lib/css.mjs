@@ -83,9 +83,15 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .rail-toggle:focus-visible{outline:1px solid var(--red);outline-offset:-3px}
 
 /* ── 报头 ── */
-.masthead{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:4px 16px;text-align:center;padding:8px 0 9px;border-bottom:4px double var(--ink);position:relative}
-.masthead h1{margin:0;font-size:clamp(24px,3vw,34px);line-height:1.1;letter-spacing:.1em;font-weight:700}
-.masthead .en{font-family:var(--sans);font-size:9.5px;letter-spacing:.18em;color:var(--muted);margin-top:3px}
+/* 2026-11-20 用户定：「报表顶部的大标题可以变小点，然后缩小标题所在的行高」。
+   原来 h1 是 clamp(24px,3vw,34px)、行高 1.1、报头上下 padding 8/9px，
+   1440 宽下量出来 h1 高 37px、整个报头 78px —— 顶上一大块，内容被压下去了。
+   现在字号收到 clamp(19px,2.2vw,25px)（1440 下 25px）、行高 1.06、
+   padding 收到 5/6px、副标题 margin-top 3→2px，报头约 51px。
+   字号缩小后字距也一并收一点（.1em→.07em），否则小字加宽字距会显得散。 */
+.masthead{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:4px 16px;text-align:center;padding:5px 0 6px;border-bottom:4px double var(--ink);position:relative}
+.masthead h1{margin:0;font-size:clamp(19px,2.2vw,25px);line-height:1.06;letter-spacing:.07em;font-weight:700}
+.masthead .en{font-family:var(--sans);font-size:9px;letter-spacing:.16em;color:var(--muted);margin-top:2px}
 .masthead-title{min-width:0}
 /* 顶栏（2026-11-19 并进报头）：书名左边放「台账 · 更新 …」，右边放「夜晚 / 护眼 / 纸面」
    和「导出 / 搜索 / 设置」。两侧各 1fr、中间 auto —— 左翼比右翼短也不会把书名推歪。
