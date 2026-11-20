@@ -359,6 +359,10 @@ tbody tr:hover{background:var(--surface)}
 .evidence ul{list-style:none;margin:0;padding:0}
 .evidence li{display:flex;gap:7px;align-items:baseline;font-size:11.5px;line-height:1.65;padding:1px 0}
 .ev-kind{flex:none;font-family:var(--sans);font-size:9px;padding:0 5px;border:1px solid var(--rule2);border-radius:3px;color:var(--muted);letter-spacing:.02em}
+/* file 类型的标签已提到卡片标题行（见 .card-file-tag），证据行里留一个同宽的
+   空占位，让「有标签」和「没标签」的行左缘仍然对齐 —— 否则文件证据这几行
+   会比别的行往左缩一截，看着像排版错位。 */
+.ev-kind.is-blank{border-color:transparent;background:none;min-width:34px}
 .ev-text{font-family:var(--mono);font-size:11px;word-break:break-word}
 .ev-look{all:unset;cursor:pointer;font-family:var(--mono);font-size:11px;word-break:break-word;border-bottom:1px dotted var(--rule2);transition:border-color .12s,color .12s}
 .ev-look:hover{color:var(--ink);border-bottom-color:var(--ink)}
@@ -388,6 +392,15 @@ tbody tr:hover{background:var(--surface)}
 .card-collapsed>summary h3{font-size:15px;margin:4px 0 0;clear:none}
 /* 车道页默认展开：标题仍是卡片标题的尺寸，收起后就是一行条目 */
 .card-open>summary h3{font-size:19px;line-height:1.35;margin:6px 0 0;clear:none}
+/* 标题行（2026-11-20）：标题文字 + 右侧「文件」标签。
+   flex 布局让标签贴行尾、标题自己换行；标签 flex:none 保证不被挤变形。
+   ⚠️ 三处 h3（article / card-collapsed / card-open）都走这一套，
+   所以这里用 .card h3 统一，不各自重复。 */
+.card h3{display:flex;align-items:baseline;gap:8px}
+.card h3 .card-title-text{flex:1 1 auto;min-width:0}
+.card-file-tag{flex:none;font-family:var(--sans);font-size:9px;line-height:1;padding:2px 6px;border:1px solid var(--rule2);border-radius:3px;color:var(--muted);letter-spacing:.02em;white-space:nowrap;align-self:center}
+/* 收起状态（只露一行）时标签也要在，样式略小一点，不抢标题 */
+.card-collapsed>summary .card-file-tag{font-size:8.5px;padding:1px 5px}
 .card-collapsed>.sections,.card-collapsed>.evidence,.card-collapsed>.card-acts{padding:0 16px 15px}
 .card-open>.sections,.card-open>.evidence,.card-open>.card-acts{padding:0 16px 15px}
 .card-collapsed>summary::after,.card-open>summary::after{content:"";position:absolute;right:12px;top:50%;transform:translateY(-50%);font-family:var(--sans);font-size:10px;line-height:1;color:var(--muted);pointer-events:none}
@@ -433,7 +446,13 @@ tbody tr:hover{background:var(--surface)}
 .workbench-head h3{margin:0;font-family:var(--serif);font-size:15px;font-weight:700;color:var(--head)}
 .workbench-desc{font-size:10.5px;color:var(--muted);line-height:1.65;font-family:var(--sans)}
 .workbench-controls{display:flex;flex-direction:column;gap:10px}
-.workbench-pool{max-height:440px;overflow:auto;border:1px solid var(--rule);background:var(--paper);border-radius:3px;padding:8px}
+/* 候选池：**不再内部滚动**（2026-11-20 用户定）。
+   以前写死 max-height:440px + overflow:auto，于是「待执行队列 / 备选 / 搁置」
+   三组一多，池子里就出现第二条滚动条，卡片被截在一个小框里 —— 用户报的
+   「每个队列都有卡片，工作台高度就不够了」就是这个。
+   现在池子跟着内容长高，滚动交给整页（只有一层滚动条，滚轮行为可预期）。
+   min-height 留着，避免「一张卡都没有」时框塌成一条线。 */
+.workbench-pool{border:1px solid var(--rule);background:var(--paper);border-radius:3px;padding:8px;min-height:88px}
 .wb-group{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch;margin-bottom:8px}
 .wb-group:last-child{margin-bottom:0}
 .wb-group-label{flex:0 0 100%;font-size:10px;color:var(--muted);font-family:var(--sans);letter-spacing:.04em;text-transform:uppercase}

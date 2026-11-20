@@ -1224,8 +1224,10 @@
         '<span class="wb-pick-title">' + esc(c.title) + "</span>" +
         '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
         // 每张备选卡都能搁置：搁置 = 「以后别在备选里给我看了」。
+        // 2026-11-20 用户定：卡片上**不显示「备选」两个字** —— 这一组本身就是备选区，
+        // 每张卡再挂个「备选」标签是重复的噪声。分组标题已经说明了它是什么。
         '<button type="button" class="wb-pick-shelf" data-wb-shelf="' + esc(c.id) + '" title="搁置：不要出现在备选里">搁置</button>' +
-        '<span class="wb-queued">备选</span></span>' +
+        "</span>" +
         "</div>"
       );
     }).join("");
