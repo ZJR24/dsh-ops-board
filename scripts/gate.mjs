@@ -41,6 +41,7 @@ const SUITES = [
   { name: "wb-mount", file: "wb-mount-test.mjs", args: [], why: "工作台单实例挂载" },
   { name: "wb-shelf", file: "wb-shelf-test.mjs", args: [], why: "卡片搁置 / 放回备选" },
   { name: "wb-pool-layout", file: "wb-pool-layout-test.mjs", args: [], why: "候选池不内部滚动 / 文件标签在标题右侧" },
+  { name: "wb-tag-style", file: "wb-tag-style-test.mjs", args: [], why: "区域标签在标题右侧、与搁置按钮轮廓同大但配色可区分" },
   { name: "wb-overview-live", file: "wb-overview-live-test.mjs", args: [], why: "总览页活数据" },
   { name: "stale-route", file: "stale-route-test.mjs", args: [], why: "坏落点不许白屏" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },

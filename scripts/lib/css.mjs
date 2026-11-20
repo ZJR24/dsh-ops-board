@@ -468,9 +468,23 @@ tbody tr:hover{background:var(--surface)}
 .wb-pick-busy{opacity:.55;cursor:default}
 .wb-pick-grip{flex:none;color:var(--muted);cursor:grab;font-size:12px;user-select:none;align-self:flex-start}
 .wb-pick-id{font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);font-size:10px;color:var(--blue);font-weight:700;flex:none}
+/* 标题行：标题文字 + 右侧区域标签（2026-11-20 用户定：区域标签放标题右侧）。
+   原来前缀压在卡片底部，和「搁置」按钮并排，两者长得几乎一样 ——
+   用户说「这个标签跟那个搁置按钮其实很相似，区分一下」。
+   现在分工明确：**标题右侧 = 区域（只读标签）、卡片底部 = 操作按钮（搁置 / ✕）**，
+   位置一分开，再靠配色区分（区域标签偏蓝灰、按钮偏中性）。 */
+.wb-pick-main{display:flex;align-items:flex-start;gap:7px;min-width:0}
 .wb-pick-title{font-size:11.5px;color:var(--ink);flex:1 1 auto;line-height:1.4;word-break:break-word}
-.wb-pick-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:2px;flex-wrap:wrap}
-.wb-pick-prefix{font-size:9.5px;color:var(--muted);flex:none;border:1px solid var(--rule2);border-radius:3px;padding:0 5px;font-family:var(--sans)}
+.wb-pick-foot{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:2px;flex-wrap:wrap}
+/* 区域标签：主色偏蓝（和 .wb-pick-id 同族，一眼是"信息"不是"按钮"），
+   比按钮更扁、字距略松。 */
+.wb-pick-prefix{flex:none;font-size:9px;line-height:1;color:var(--blue);border:1px solid color-mix(in srgb,var(--blue) 34%,transparent);border-radius:3px;padding:2px 5px;font-family:var(--sans);letter-spacing:.02em;background:color-mix(in srgb,var(--blue) 7%,transparent);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;align-self:flex-start}
+/* 操作按钮（搁置 / 备选）：**轮廓尺寸与区域标签完全一致** ——
+   同样的 9px 字号、同样的 2px 5px 内边距、同样的 3px 圆角、同样 1px 边框，
+   量出来高度一样。区别只在配色：按钮起手是中性灰、悬停转深，
+   区域标签是蓝调只读。这样"大小一样但一眼分得清谁是能点的"。 */
+.wb-pick-shelf,.wb-pick-unshelf{flex:none;border:1px solid var(--rule2);background:var(--surface);color:var(--muted);cursor:pointer;font-family:var(--sans);font-size:9px;line-height:1;padding:2px 5px;border-radius:3px;letter-spacing:.02em}
+.wb-pick-shelf:hover,.wb-pick-unshelf:hover{color:var(--ink);border-color:var(--ink);background:var(--surface-hover)}
 .wb-pick .wb-occupied{color:var(--muted);font-size:10px}
 .wb-pick .wb-queued{color:var(--muted);font-size:10px;font-style:italic}
 .wb-state-tag{font-size:9.5px;color:#8a5a00;background:#fff3cd;border:1px solid #e6c66a;border-radius:3px;padding:1px 6px;font-family:var(--sans);white-space:normal;word-break:break-word;max-width:100%;flex:1 1 auto;text-align:left;min-width:0}
@@ -485,9 +499,8 @@ tbody tr:hover{background:var(--surface)}
    「有的任务，我是不想他出现在备选的」→ 备选卡上多一个「搁置」按钮，
    收进单独一行「搁置」；搁置里的卡点「备选」回到备选队列。
    搁置是**用户的意愿**（存 localStorage），不是台账状态 —— 所以样式上要
-   比备选更"退后"：更淡、更小、不加可拖手势。 */
-.wb-pick-shelf,.wb-pick-unshelf{flex:none;border:1px solid var(--rule2);background:var(--surface);color:var(--muted);cursor:pointer;font-family:var(--sans);font-size:9.5px;line-height:1;padding:2px 6px;border-radius:3px}
-.wb-pick-shelf:hover,.wb-pick-unshelf:hover{color:var(--ink);border-color:var(--ink);background:var(--surface-hover)}
+   比备选更"退后"：更淡、更小、不加可拖手势。
+   ⚠️ 按钮的轮廓尺寸定义在上面（与 .wb-pick-prefix 一致），这里只管交互态。 */
 .wb-pick-shelf:focus-visible,.wb-pick-unshelf:focus-visible{outline:2px solid var(--red);outline-offset:2px}
 .wb-pick.wb-shelved{border-style:dotted;border-color:var(--rule);background:transparent;opacity:.72}
 .wb-pick.wb-shelved .wb-pick-title{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--rule2)}

@@ -1196,8 +1196,10 @@
           esc((c.by || "他人") + " 正在处理，处理完自动回到备选") + '">' +
           '<span class="wb-pick-row">' +
           '<span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
-          '<span class="wb-pick-title">' + label + "</span>" +
-          '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+          // 区域标签跟在标题右侧（2026-11-20 用户定），不再压在卡片底部。
+          '<span class="wb-pick-main"><span class="wb-pick-title">' + label + "</span>" +
+          '<span class="wb-pick-prefix">' + esc(c.prefix) + "</span></span>" +
+          '<span class="wb-pick-foot">' +
           '<span class="wb-state-tag">处理中</span></span>' +
           "</div>"
         );
@@ -1206,8 +1208,9 @@
         '<div class="wb-pick" draggable="true" data-wb-id="' + esc(c.id) + '">' +
         '<span class="wb-pick-row"><span class="wb-pick-grip" title="拖动排序">⠿</span>' +
         '<span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
-        '<span class="wb-pick-title">' + label + "</span>" +
-        '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+        '<span class="wb-pick-main"><span class="wb-pick-title">' + label + "</span>" +
+        '<span class="wb-pick-prefix">' + esc(c.prefix) + "</span></span>" +
+        '<span class="wb-pick-foot">' +
         '<button type="button" class="wb-pick-x" data-wb-x="' + esc(c.id) + '" title="移出队列">✕</button></span>' +
         "</div>"
       );
@@ -1221,8 +1224,9 @@
       return (
         '<div class="wb-pick wb-standby" data-wb-id="' + esc(c.id) + '" data-wb-add="' + esc(c.id) + '" title="点一下加入队列">' +
         '<span class="wb-pick-row"><span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
-        '<span class="wb-pick-title">' + esc(c.title) + "</span>" +
-        '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+        '<span class="wb-pick-main"><span class="wb-pick-title">' + esc(c.title) + "</span>" +
+        '<span class="wb-pick-prefix">' + esc(c.prefix) + "</span></span>" +
+        '<span class="wb-pick-foot">' +
         // 每张备选卡都能搁置：搁置 = 「以后别在备选里给我看了」。
         // 2026-11-20 用户定：卡片上**不显示「备选」两个字** —— 这一组本身就是备选区，
         // 每张卡再挂个「备选」标签是重复的噪声。分组标题已经说明了它是什么。
@@ -1240,8 +1244,9 @@
       return (
         '<div class="wb-pick wb-shelved" data-wb-id="' + esc(c.id) + '" title="已搁置：不会出现在备选里">' +
         '<span class="wb-pick-row"><span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
-        '<span class="wb-pick-title">' + esc(c.title) + "</span>" +
-        '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+        '<span class="wb-pick-main"><span class="wb-pick-title">' + esc(c.title) + "</span>" +
+        '<span class="wb-pick-prefix">' + esc(c.prefix) + "</span></span>" +
+        '<span class="wb-pick-foot">' +
         '<button type="button" class="wb-pick-unshelf" data-wb-unshelf="' + esc(c.id) + '" title="放回备选队列">备选</button>' +
         "</span>" +
         "</div>"
