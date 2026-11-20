@@ -59,34 +59,48 @@ const ok = (c, m, extra) => { if (c) { pass++; console.log("  ✓ " + m + (extra
 await send("Page.navigate", { url: B + "/#view-overview" });
 await wait(3200);
 
-console.log("[1] 区域标签在标题右侧");
+console.log("[1] 区域标签在**编号行**（OPS-903 那行）的右侧");
+// 2026-11-20 最终位置：标签跟编号同一行、在编号右边。
+// 用户两次纠正过：「不是正文/标题的右侧，是这个 OPS-903 的右侧」。
+// 所以判据也换成对**编号行**量：标签的垂直中心要落在编号行内，
+// 水平要排在编号右边 —— 拿标题行当基准是错的（那正是上一版的做法）。
 const pos = JSON.parse(await ev(`JSON.stringify((function(){
   var cards = Array.prototype.slice.call(document.querySelectorAll('[data-wb-pool] .wb-pick'));
   var out = [];
-  var notRight = 0, inFoot = 0;
+  var notRight = 0, notSameRow = 0, inFoot = 0, notInRow = 0;
   cards.forEach(function(card){
     var pre = card.querySelector('.wb-pick-prefix');
-    var title = card.querySelector('.wb-pick-title');
-    if (!pre || !title) return;
-    var pr = pre.getBoundingClientRect(), tr = title.getBoundingClientRect();
+    var idEl = card.querySelector('.wb-pick-row .wb-pick-id');
+    if (!pre || !idEl) return;
+    var pr = pre.getBoundingClientRect(), ir = idEl.getBoundingClientRect();
     var cr = card.getBoundingClientRect();
-    // 「在标题右侧」：标签左缘 ≥ 标题右缘 - 2，且与该标题在同一视觉行（垂直有交叠）
-    var rightOfTitle = pr.left >= tr.right - 2;
-    var sameRow = pr.top < tr.bottom && pr.bottom > tr.top;
-    var inFootEl = !!pre.closest('.wb-pick-foot');
-    if (!(rightOfTitle && sameRow)) notRight++;
-    if (inFootEl) inFoot++;
+    var inRow = !!pre.closest('.wb-pick-row');
+    // 「同一行」= 标签的垂直中心落在编号那一行内
+    var tagMid = pr.top + pr.height / 2;
+    var sameRow = tagMid >= ir.top - 2 && tagMid <= ir.bottom + 2;
+    // 「在编号右侧」= 标签左缘在编号左缘之后（顶到行尾由 margin-left:auto 保证）
+    var rightOfId = pr.left > ir.left;
+    if (!rightOfId) notRight++;
+    if (!sameRow) notSameRow++;
+    if (!inRow) notInRow++;
+    if (pre.closest('.wb-pick-foot')) inFoot++;
     if (out.length < 4) out.push({
       id: card.getAttribute('data-wb-id'), prefix: pre.textContent.trim(),
-      prLeft: Math.round(pr.left), trRight: Math.round(tr.right), cardRight: Math.round(cr.right),
-      rightOfTitle: rightOfTitle, sameRow: sameRow, inFoot: inFootEl
+      tagLeft: Math.round(pr.left), idLeft: Math.round(ir.left), idRight: Math.round(ir.right),
+      tagMid: Math.round(tagMid), idTop: Math.round(ir.top), idBottom: Math.round(ir.bottom),
+      cardRight: Math.round(cr.right),
+      rightOfId: rightOfId, sameRow: sameRow, inRow: inRow, inFoot: !!pre.closest('.wb-pick-foot')
     });
   });
-  return { cards: cards.length, notRight: notRight, inFoot: inFoot, samples: out };
+  return { cards: cards.length, notRight: notRight, notSameRow: notSameRow,
+           inFoot: inFoot, notInRow: notInRow, samples: out };
 })())`));
 ok(pos.cards > 0, "候选池有卡", pos.cards + " 张");
-ok(pos.notRight === 0, "每张卡的区域标签都在标题右侧", pos.notRight + " 张不在右侧");
+ok(pos.notInRow === 0, "标签在编号行（.wb-pick-row）里，不在标题那行", pos.notInRow + " 张不在编号行");
+ok(pos.notSameRow === 0, "标签与编号**同一行**（垂直中心落在编号行内）", pos.notSameRow + " 张不同行");
+ok(pos.notRight === 0, "标签在编号的右侧", pos.notRight + " 张在左边");
 ok(pos.inFoot === 0, "标签不再压在卡片底部（.wb-pick-foot）里", pos.inFoot + " 张还在底部");
+if (pos.samples.length) console.log("    样例：" + JSON.stringify(pos.samples));
 if (pos.samples.length) console.log("    样例：" + JSON.stringify(pos.samples));
 
 console.log("\n[2] 区域标签与「搁置」按钮：轮廓尺寸一致");
@@ -143,7 +157,7 @@ const forms = JSON.parse(await ev(`JSON.stringify((function(){
     window.__wbRenderPool && window.__wbRenderPool(pool);   // 剩下的进备选
   }
   var kinds = { queue: 0, standby: 0, shelved: 0 };
-  var prefixInMain = 0, prefixTotal = 0;
+  var prefixInRow = 0, prefixTotal = 0;
   Array.prototype.forEach.call(pool.querySelectorAll('.wb-pick'), function(c){
     if (c.classList.contains('wb-shelved')) kinds.shelved++;
     else if (c.classList.contains('wb-standby')) kinds.standby++;
@@ -152,16 +166,17 @@ const forms = JSON.parse(await ev(`JSON.stringify((function(){
     var pre = c.querySelector('.wb-pick-prefix');
     if (pre) {
       prefixTotal++;
-      if (pre.closest('.wb-pick-main')) prefixInMain++;
+      // 最终位置：编号行（.wb-pick-row），不是标题行
+      if (pre.closest('.wb-pick-row')) prefixInRow++;
     }
   });
-  return { kinds: kinds, prefixTotal: prefixTotal, prefixInMain: prefixInMain,
+  return { kinds: kinds, prefixTotal: prefixTotal, prefixInRow: prefixInRow,
            occupiedExists: !!pool.querySelector('.wb-pick.wb-occupied') };
 })())`));
 ok(forms.kinds.queue > 0 && forms.kinds.standby > 0 && forms.kinds.shelved > 0,
   "三种形态都在（待执行 / 备选 / 搁置）", JSON.stringify(forms.kinds));
-ok(forms.prefixTotal > 0 && forms.prefixInMain === forms.prefixTotal,
-  "每张卡的标签都在 .wb-pick-main（标题行）里，不在底部", forms.prefixInMain + "/" + forms.prefixTotal);
+ok(forms.prefixTotal > 0 && forms.prefixInRow === forms.prefixTotal,
+  "每张卡的标签都在 .wb-pick-row（编号行）里，不在底部也不在标题行", forms.prefixInRow + "/" + forms.prefixTotal);
 
 // 收尾
 await ev(`(function(){ window.__wb.shelved = []; window.__wb.dragPool = []; window.__wbRenderPool && window.__wbRenderPool(document.querySelector('[data-wb-pool]')); Object.keys(localStorage).filter(function(k){return k.indexOf('ops-board-wb-shelved')===0;}).forEach(function(k){localStorage.removeItem(k);}); return 1; })()`);

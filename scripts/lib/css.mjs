@@ -461,7 +461,6 @@ tbody tr:hover{background:var(--surface)}
 .wb-group-label{flex:0 0 100%;font-size:10px;color:var(--muted);font-family:var(--sans);letter-spacing:.04em;text-transform:uppercase}
 .workbench-empty{font-size:11.5px;color:var(--muted);padding:10px 6px;margin:0;font-family:var(--sans)}
 .wb-pick{display:flex;flex-direction:column;flex:0 0 168px;min-height:74px;gap:5px;padding:9px 9px;border:1px solid var(--rule);border-radius:4px;cursor:pointer;font-family:var(--sans);background:var(--surface);box-shadow:0 1px 2px rgba(0,0,0,.12)}
-.wb-pick-row{display:flex;align-items:baseline;gap:6px}
 .wb-pick:hover{background:var(--surface-hover)}
 .wb-pick[draggable=true]{cursor:grab}
 .wb-pick[draggable=true]:active{cursor:grabbing}
@@ -471,17 +470,16 @@ tbody tr:hover{background:var(--surface)}
 .wb-pick-busy{opacity:.55;cursor:default}
 .wb-pick-grip{flex:none;color:var(--muted);cursor:grab;font-size:12px;user-select:none;align-self:flex-start}
 .wb-pick-id{font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);font-size:10px;color:var(--blue);font-weight:700;flex:none}
-/* 标题行：标题文字 + 右侧区域标签（2026-11-20 用户定：区域标签放标题右侧）。
-   原来前缀压在卡片底部，和「搁置」按钮并排，两者长得几乎一样 ——
-   用户说「这个标签跟那个搁置按钮其实很相似，区分一下」。
-   现在分工明确：**标题右侧 = 区域（只读标签）、卡片底部 = 操作按钮（搁置 / ✕）**，
-   位置一分开，再靠配色区分（区域标签偏蓝灰、按钮偏中性）。 */
-.wb-pick-main{display:flex;align-items:flex-start;gap:7px;min-width:0}
+/* 编号行：编号 + 区域标签（2026-11-20 用户定：标签放 OPS-903 那一行的右侧）。
+   标签用 margin-left:auto 顶到行尾，编号留在左边 ——
+   这样「标签在右侧」是行内对齐的结果，不是靠 padding 猜的。 */
+.wb-pick-row{display:flex;align-items:baseline;gap:6px}
+.wb-pick-row .wb-pick-prefix{margin-left:auto}
 .wb-pick-title{font-size:11.5px;color:var(--ink);flex:1 1 auto;line-height:1.4;word-break:break-word}
 .wb-pick-foot{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:2px;flex-wrap:wrap}
 /* 区域标签：主色偏蓝（和 .wb-pick-id 同族，一眼是"信息"不是"按钮"），
    比按钮更扁、字距略松。 */
-.wb-pick-prefix{flex:none;font-size:9px;line-height:1;color:var(--blue);border:1px solid color-mix(in srgb,var(--blue) 34%,transparent);border-radius:3px;padding:2px 5px;font-family:var(--sans);letter-spacing:.02em;background:color-mix(in srgb,var(--blue) 7%,transparent);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;align-self:flex-start}
+.wb-pick-prefix{flex:none;font-size:9px;line-height:1;color:var(--blue);border:1px solid color-mix(in srgb,var(--blue) 34%,transparent);border-radius:3px;padding:2px 5px;font-family:var(--sans);letter-spacing:.02em;background:color-mix(in srgb,var(--blue) 7%,transparent);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 操作按钮（搁置 / 备选）：**轮廓尺寸与区域标签完全一致** ——
    同样的 9px 字号、同样的 2px 5px 内边距、同样的 3px 圆角、同样 1px 边框，
    量出来高度一样。区别只在配色：按钮起手是中性灰、悬停转深，
