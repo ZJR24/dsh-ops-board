@@ -1167,6 +1167,14 @@ const claimsPath = resolve(argValue("claims") || join(ROOT, "flow-claims.json"))
   （`:1761`），复用的窗口保留创建时的标题 —— 所以标题必须在**创建时**就正确，
   不能指望复用后再改名；宿主还会在复用后把**实时标题**回写映射表（`:1787-1801`），
   所以第一次创建时拼对就一劳永逸。
+- **旧窗口怎么修**（这条是补的，第一次只改了创建路径）：只在新会话上改名，意味着
+  **已经存在的重复标题永远修不掉** —— 而映射表里那些 `调度台 · 调度台`、`数据源 · 数据源`
+  正是用户看到的东西。所以复用旧窗口时也改名，但**只在标题明显是代码自动拼的**时候动手
+  （`looksAutoTitle(title, itemKey)`：以复用键开头，去掉键名、`HH:MM` 时间戳和分隔符后
+  什么都不剩，或剩下的还是键名本身）。判据来自真实数据：
+  改 `调度台 · 调度台` / `本批 3 卡 · 23:08 · 本批 3 卡`，
+  不改 `执行台 · 逐张执行` / `OPS-022 · 我在查的这条`（人写的后缀必须留着）。
+  两条断言都在 `client-smoke`：一条验「修复自动标题」，一条验「不动人起的名字」。
 - **判据**：`[5p]` 断言 `title !== item`、`sessionTitle === "执行台"`；
   插件侧 `test/host-smoke.mjs` 新增三条：带 `sessionTitle` 的 ask 被接受、
   SSE 帧里 `"sessionTitle":"执行台"` 原样转发、`item`/`title` 各司其职。
@@ -1187,7 +1195,7 @@ const claimsPath = resolve(argValue("claims") || join(ROOT, "flow-claims.json"))
   但 `readSessionMap` 早已归一化成 `{id, title, history}` → 改成认 `.id` 并顺带验 `history`。
 
 **回归**：`flow-workbench-test` 77 → **93 通过 / 0 失败**；`flow-workbench-run` **10/0**；
-`npm run gate` **25 通过 / 0 失败（298.8s）**；双板 `verify-board` 通过
+`npm run gate` **25 通过 / 0 失败（299.2s）**；双板 `verify-board` 通过
 （cyber 946.2 KB / practise 413.5 KB）；插件 `host-smoke` PASS、`client-smoke` PASS
 （顺带修了 `client-smoke` 的 `sessions` 桩：缺 `retain()`，整条 ask 链在 `retain` 处抛错）。
 **教训**：`client.js` 是**内联进 `<script>`** 的，注释里出现字面量 `${` 会被
