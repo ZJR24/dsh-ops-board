@@ -43,6 +43,8 @@ const SUITES = [
   { name: "stale-route", file: "stale-route-test.mjs", args: [], why: "坏落点不许白屏" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
+  { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },
+  { name: "section-fold-practise", file: "section-fold-test.mjs", args: ["--board", PRACTISE], why: "每个大标题模块都能收起（小看板）" },
   { name: "stage-ask-cyber", file: "stage-ask-test.mjs", args: ["--board", CYBER], why: "「计划中」AI 入口 + 待处理表已搬到车道页" },
   { name: "stage-ask-practise", file: "stage-ask-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板，计划中同样是 0 项）" },
 

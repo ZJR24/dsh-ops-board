@@ -328,6 +328,9 @@
     // 从表格点条目标题跳过来时，目标卡片可能被用户收起来了。
     // 不展开的话跳过去只有一行、看不到正文，等于跳了个寂寞。
     if (el.tagName === "DETAILS" && !el.open) el.open = true;
+    // 同理：目标所在的**大标题模块**也可能被收起了（数据折叠），先展开它，
+    // 否则跳过去只能看到标题栏。这一步必须在量位置之前。
+    unfoldForTarget(el);
     var nav = document.querySelector(".nav");
     var top = el.getBoundingClientRect().top + window.scrollY - (nav ? nav.offsetHeight : 0) - 12;
     window.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
@@ -587,6 +590,87 @@
   }
 
   applyFont(prefsNow().font);
+
+  // ──────────────── 每个大标题模块都能收起 ────────────────
+
+  // 2026-11-20 用户定：「每个页面每个大标题模块，我觉得都应该是可以被收起的」。
+  //
+  // 结构约定（render.mjs / parts.mjs 的 sectionHead 生成）：
+  //   标题栏 .section-head.is-foldable 里一个 .section-fold[data-fold="<key>"]
+  //   正文   紧跟其后的 [data-fold-body="<key>"]；没有这个节点就退回「下一个兄弟」。
+  //
+  // 为什么不把正文按 id 找：id 是给锚点跳转用的，标题栏自己也常带着同一个 id 的
+  // group（如 .detail-group），按 id 找会摸到外层容器，一收连标题一起没了。
+  // 按 data-fold-body 找是精确的。
+  //
+  // 状态记本机 ops-fold-<key>，默认**全部展开**（干活的地方，进来要看见内容）。
+  var FOLD_SEL = ".section-fold[data-fold]";
+
+  function foldBodyOf(btn) {
+    var key = btn.getAttribute("data-fold") || "";
+    if (!key) return null;
+    var head = btn.closest(".section-head") || btn.closest(".workbench-head");
+    // 优先找**同一个容器里**的 data-fold-body，避免跨块串到别人的正文
+    var scope = head ? head.parentNode : document;
+    var body = scope ? scope.querySelector('[data-fold-body="' + key + '"]') : null;
+    if (body) return body;
+    // 兜底：标题栏的直接下一个兄弟（老结构没有包一层 data-fold-body 时）
+    var next = head && head.nextElementSibling;
+    if (next && next.getAttribute && next.getAttribute("data-fold-body") === key) return next;
+    // 最后才按 aria-controls / id
+    var cid = btn.getAttribute("aria-controls") || "";
+    return cid ? document.getElementById(cid) : null;
+  }
+
+  function setSectionFold(btn, collapsed) {
+    if (!btn) return;
+    var body = foldBodyOf(btn);
+    if (body) {
+      if (collapsed) body.setAttribute("hidden", "");
+      else body.removeAttribute("hidden");
+    }
+    var head = btn.closest(".section-head");
+    if (head) head.classList.toggle("is-collapsed", !!collapsed);
+    var wbHead = btn.closest(".workbench-head");
+    if (wbHead) wbHead.classList.toggle("is-collapsed", !!collapsed);
+    btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    var label = btn.getAttribute("aria-label") || "这一块";
+    var name = label.replace(/^(收起|展开)[「"]?/, "").replace(/[」"]$/, "") || "这一块";
+    btn.setAttribute("aria-label", (collapsed ? "展开" : "收起") + "「" + name + "」");
+    btn.title = collapsed ? "展开这一块" : "收起这一块";
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll(FOLD_SEL), function (btn) {
+    var key = btn.getAttribute("data-fold") || "";
+    var saved = false;
+    try {
+      saved = localStorage.getItem("ops-fold-" + key) === "1";
+    } catch (e) {}
+    // 一进来就按上次的状态摆好（不等点击），否则刷新后会闪一下再收起来
+    setSectionFold(btn, saved);
+    btn.addEventListener("click", function (e) {
+      // 这个按钮可能落在 summary 里或别的可点容器里，别让外层把手势吃掉
+      e.preventDefault();
+      e.stopPropagation();
+      var collapsed = btn.getAttribute("aria-expanded") !== "false";
+      setSectionFold(btn, collapsed);
+      try {
+        localStorage.setItem("ops-fold-" + key, collapsed ? "1" : "0");
+      } catch (e) {}
+    });
+  });
+
+  // 跳到被收起的模块里的锚点（表格点条目标题、阶段格子点进来）时，
+  // 目标正文得先展开，否则跳过去只看到一行标题 —— 和卡片那条同一个道理。
+  function unfoldForTarget(el) {
+    if (!el || !el.closest) return;
+    var body = el.closest("[data-fold-body]");
+    if (!body || !body.hasAttribute("hidden")) return;
+    var key = body.getAttribute("data-fold-body") || "";
+    var btn = document.querySelector('.section-fold[data-fold="' + key + '"]');
+    if (btn) setSectionFold(btn, false);
+    else body.removeAttribute("hidden");
+  }
 
   // ──────────────── 侧栏每块的「收起明细」 ────────────────
 

@@ -238,6 +238,33 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .section-head h2::before{content:"";position:absolute;left:0;top:.28em;width:4px;height:.95em;background:var(--red)}
 .section-head span{font-family:var(--sans);font-size:10px;color:var(--muted);display:inline-flex;align-items:center;gap:9px}
 .head-ask{font-size:9.5px;padding:1px 8px}
+/* ── 每个大标题模块都能收起 ────────────────────────────────────────
+   2026-11-20 用户定：「每个页面每个大标题模块，我觉得都应该是可以被收起的」。
+   做法是把标题栏左侧的红色竖线变成按钮（.section-fold）：
+   点一下收掉这一块的正文，标题栏留在原位，再点展开。
+
+   为什么不用 <details>/<summary> 包整块：
+   标题栏右侧常常挂着「问 AI」按钮（.head-ask），summary 里的按钮点击会被
+   浏览器当成「展开/收起」处理，那个入口就废了。所以正文由 JS 按
+   aria-controls 找节点加 [hidden]，事件只挂在左侧那个小按钮上。
+
+   竖线为什么还留着：它原来由 .section-head h2::before 画。现在可收起的标题
+   由按钮自己画同一根线（.section-fold::before），所以去掉了 h2 的伪元素 ——
+   否则折叠按钮和标题各画一根，视觉上变成两道杠。 */
+.section-head.is-foldable h2{padding-left:0}
+.section-head.is-foldable h2::before{display:none}
+/* 三个孩子（折叠钮 / 标题 / 右侧计数）不再 space-between —— 那会把标题推到中间。
+   改成左对齐，只让右侧那段靠右。 */
+.section-head.is-foldable{justify-content:flex-start}
+.section-head.is-foldable>span{margin-left:auto}
+.section-fold{appearance:none;-webkit-appearance:none;flex:none;align-self:center;display:inline-flex;align-items:center;gap:7px;margin:0;padding:2px 4px 2px 0;border:0;background:none;color:var(--ink);cursor:pointer;font:inherit}
+.section-fold::before{content:"";flex:none;width:4px;height:.95em;background:var(--red)}
+.section-fold::after{content:"";flex:none;width:5px;height:5px;border-right:1px solid var(--muted);border-bottom:1px solid var(--muted);transform:rotate(45deg) translate(-1px,-1px);transition:transform .15s}
+.section-head.is-collapsed .section-fold::after{transform:rotate(-45deg) translate(-1px,1px)}
+.section-fold:hover::after{border-color:var(--ink)}
+.section-fold:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+/* 收起来时标题右侧仍要能看出这一块有多少东西，不然只剩一个名字 */
+.section-head.is-collapsed{opacity:.72}
 .details-main{padding:22px 0 24px}
 .details-title{font-size:clamp(30px,3.5vw,42px);line-height:1.22;letter-spacing:-.01em;margin:0 0 8px}
 .detail-group{padding:18px 0 4px}
@@ -393,6 +420,10 @@ tbody tr:hover{background:var(--surface)}
 .wb-mount>.workbench{margin-top:0}
 .workbench{border:1px solid var(--rule2);background:var(--surface-soft);padding:14px 16px;margin-top:18px;border-radius:3px}
 .workbench-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.workbench-head .section-fold{align-self:center}
+/* 工作台正文包一层（.workbench-body）：它要能被「工作台」那个折叠按钮收起来，
+   JS 按 data-fold-body / aria-controls 找的就是这一层。本身不出样式。 */
+.workbench-body{padding:0;margin:0}
 .workbench-head h3{margin:0;font-family:var(--serif);font-size:15px;font-weight:700;color:var(--head)}
 .workbench-desc{font-size:10.5px;color:var(--muted);line-height:1.65;font-family:var(--sans)}
 .workbench-controls{display:flex;flex-direction:column;gap:10px}
@@ -486,7 +517,11 @@ tbody tr:hover{background:var(--surface)}
 /* ── Skill 统计（独立页） ── */
 .skills{border-top:1px solid var(--rule2);padding-top:14px;margin-bottom:6px}
 #skill-group-used,#skill-group-produced,#skill-group-related{border:1px solid var(--rule2);background:var(--surface-soft);padding:12px 14px 13px;margin:14px 0 0;scroll-margin-top:70px}
-.skill-group>h2{margin:0 0 4px;font-family:var(--serif);font-size:16px;font-weight:700;color:var(--head);letter-spacing:.02em;border-bottom:1px solid var(--rule);padding-bottom:6px}
+/* Skill 页三个分组的标题本来比车道页的分节小一号（16px）。
+   2026-11-20 加折叠按钮后它们也走 .section-head（22px），层级会被拉平 ——
+   这里按原样压回 16px，三个分组的视觉从属关系保持不变。 */
+.skill-group .section-head h2{font-size:16px}
+.skill-group .section-head{border-bottom:1px solid var(--rule)}
 .skill-group>.rail-note{margin:6px 0 4px}
 .skill-group>h3{margin:0 0 6px;font-family:var(--sans);font-size:10px;letter-spacing:.08em;color:var(--muted);font-weight:700;border-bottom:1px dotted var(--rule);padding-bottom:5px}
 .skill-group>h3 b{color:var(--ink);font-weight:700}

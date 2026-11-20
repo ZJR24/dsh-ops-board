@@ -380,6 +380,37 @@ export function itemTable(config, lane, items) {
 </table></div>`;
 }
 
+// ── 大标题模块的标题栏（可收起） ──
+
+// 2026-11-20 用户定：「每个页面每个大标题模块，我觉得都应该是可以被收起的」。
+//
+// 所以所有 .section-head 统一走这个函数生成，标题栏左侧那根红竖线做成按钮：
+// 点一下把这一块的正文收掉，标题栏留在原位，再点展开。
+//
+// 三个形状：
+//   sectionHead({ title, meta })              普通标题栏（正文是紧接着的下一个兄弟节点）
+//   sectionHead({ title, meta, bodyId })      正文节点不在「下一个兄弟」位置时，显式给 id
+//   sectionHead({ title, meta, raw })         正文已经在字符串里拼好了（这里直接返回标题栏+正文）
+//
+// 为什么不用 <details>/<summary>：标题栏右侧常挂「问 AI」按钮，summary 里的
+// 按钮点击会被浏览器当成展开/收起，那个入口就废了。正文靠 JS 加 [hidden]。
+//
+// 折叠状态记在 localStorage 的 ops-fold-<key> 上（key 由调用方给，通常就是
+// 正文节点的 id），刷新后保持。默认**全部展开** —— 这块是干活的地方，
+// 一进来就该看见内容；收起是用户自己的选择。
+export function sectionHead({ title, meta = "", bodyId = "", key = "", askBtn = "", raw = "", tag = "div" }) {
+  const foldKey = String(key || bodyId || "").trim();
+  // 没有 key 就没法记状态、也没法让 JS 找到正文 —— 那种情况退回原来的静态标题栏，
+  // 不留一个点了没反应的按钮（那是比不能收更糟的体验）。
+  if (!foldKey) {
+    return `<${tag} class="section-head"><h2>${title}</h2><span>${meta}${askBtn}</span></${tag}>${raw}`;
+  }
+  const btn = `<button class="section-fold" type="button" aria-expanded="true" data-fold="${esc(foldKey)}"${
+    bodyId ? ` aria-controls="${esc(bodyId)}"` : ""
+  } aria-label="收起「${esc(String(title).replace(/<[^>]*>/g, ""))}」" title="收起这一块"></button>`;
+  return `<${tag} class="section-head is-foldable" data-fold-head="${esc(foldKey)}">${btn}<h2>${title}</h2><span>${meta}${askBtn}</span></${tag}>${raw}`;
+}
+
 // ── 分节 ──
 
 export function stageBlock(config, lane, stage, items, options = {}) {
@@ -406,8 +437,12 @@ export function stageBlock(config, lane, stage, items, options = {}) {
   }
 
   return `<section class="detail-group" id="stage-${lane.key}-${stage.key}">
-  <div class="section-head"><h2>${esc(stage.label)}</h2><span>${list.length} 项${askBtn}</span></div>
-  ${body}
+  ${sectionHead({
+    title: esc(stage.label),
+    meta: `${list.length} 项${askBtn}`,
+    key: `stage-${lane.key}-${stage.key}`,
+  })}
+  <div data-fold-body="stage-${lane.key}-${stage.key}">${body}</div>
 </section>`;
 }
 

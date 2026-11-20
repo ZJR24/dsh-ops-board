@@ -40,6 +40,7 @@ import {
   historyList,
   openIndexLines,
   askOff,
+  sectionHead,
 } from "./lib/parts.mjs";
 import { boardContext } from "./lib/context.mjs";
 // buildFlow 曾用于渲染工作流画布。画布 2026-11-18 去掉，工作流页同日删除，
@@ -297,23 +298,33 @@ function viewSkills(config, ledger) {
       </div>
     </div>
     <section class="issue-section">
-      <div class="section-head"><h2>问 AI</h2><span>先选动作，再点「发送」${askOff(config) ? "" : '<button class="btn btn-ask head-ask" type="button" data-ask-skills>问整页 Skill</button>'}</span></div>
-      <p class="stage-empty" style="border:0;padding:0">这一页的每条 skill 旁边也有「问 AI」；点哪条就围绕哪条问，点上面这个按钮则针对整页。</p>
+      ${sectionHead({
+        title: "问 AI",
+        meta: `先选动作，再点「发送」${askOff(config) ? "" : '<button class="btn btn-ask head-ask" type="button" data-ask-skills>问整页 Skill</button>'}`,
+        key: "skills-ask",
+      })}
+      <div data-fold-body="skills-ask"><p class="stage-empty" style="border:0;padding:0">这一页的每条 skill 旁边也有「问 AI」；点哪条就围绕哪条问，点上面这个按钮则针对整页。</p></div>
     </section>
     <section class="skill-group" id="skill-group-used" data-skill-group="used">
-      <h2>会话里用过的</h2>
+      ${sectionHead({ title: "会话里用过的", key: "skills-used" })}
+      <div data-fold-body="skills-used">
       <p class="rail-note">Harness 会话日志里 <code>skill</code> 工具真的被调用的记录；只算工作目录属于这个项目（项目目录 / 看板目录）的会话。</p>
       ${usedList}
+      </div>
     </section>
     <section class="skill-group" id="skill-group-produced" data-skill-group="produced">
-      <h2>项目产出的</h2>
+      ${sectionHead({ title: "项目产出的", key: "skills-produced" })}
+      <div data-fold-body="skills-produced">
       <p class="rail-note">项目目录里带 <code>SKILL.md</code> 的；frontmatter 写了 <code>agent_created: true</code> 的标「agent 生成」。</p>
       ${producedList}
+      </div>
     </section>
     <section class="skill-group" id="skill-group-related" data-skill-group="related">
-      <h2>为它写的</h2>
+      ${sectionHead({ title: "为它写的", key: "skills-related" })}
+      <div data-fold-body="skills-related">
       <p class="rail-note">skill 根里的 SKILL.md，说明里点名这个项目，或正文反复提到它（只在命令示例里出现一次的不算）。</p>
       ${relatedList}
+      </div>
     </section>
   </div>
 </section>`;
@@ -338,9 +349,12 @@ function pendingSection(config, ledger, lane, title, emptyText, headAsk) {
   const askBtn = headAsk && !askOff(config)
     ? `<button class="btn btn-ask head-ask" type="button" ${headAsk.attr}>${esc(headAsk.label)}</button>`
     : "";
+  const secKey = "pending-" + lane.key;
   return `<section class="issue-section priority-block">
-  <div class="section-head"><h2>${esc(title)}</h2><span>${items.length} 个待处理${askBtn}</span></div>
+  ${sectionHead({ title: esc(title), meta: `${items.length} 个待处理${askBtn}`, key: secKey })}
+  <div data-fold-body="${esc(secKey)}">
   ${body}
+  </div>
 </section>`;
 }
 
@@ -367,20 +381,28 @@ function viewOverview(config, ledger) {
   const laneTables = restLanes
     .map((lane) => {
       const items = sortItems(lane, itemsOfLane(ledger, lane.key));
+      const secKey = "overview-lane-" + lane.key;
       return `<section class="issue-section">
-  <div class="section-head"><h2>${esc(lane.label)}一览</h2><span>共 ${items.length} 个 · ${esc(config.labels.overviewHint)}</span></div>
-  ${items.length ? itemTable(config, lane, items) : `<p class="stage-empty">这个车道暂时没有${esc(lane.countNoun)}。</p>`}
+  ${sectionHead({ title: esc(lane.label) + "一览", meta: `共 ${items.length} 个 · ${esc(config.labels.overviewHint)}`, key: secKey })}
+  <div data-fold-body="${esc(secKey)}">${items.length ? itemTable(config, lane, items) : `<p class="stage-empty">这个车道暂时没有${esc(lane.countNoun)}。</p>`}</div>
 </section>`;
     })
     .join("");
 
+  const historyKey = "history-overview";
   return `<section class="view" data-view="overview" id="${viewId("overview")}">
   <div class="main-col">
     ${wbMount()}
     ${laneTables}
     <div class="history" data-history-section>
-      <div class="section-head"><h2>${esc(config.labels.historyTitle)}</h2><span class="history-sub" data-default="共 ${(ledger.history || []).length} 条 · 最近的在下" aria-live="polite">共 ${(ledger.history || []).length} 条 · 最近的在下</span></div>
+      ${sectionHead({
+        title: esc(config.labels.historyTitle),
+        meta: `<span class="history-sub" data-default="共 ${(ledger.history || []).length} 条 · 最近的在下" aria-live="polite">共 ${(ledger.history || []).length} 条 · 最近的在下</span>`,
+        key: historyKey,
+      })}
+      <div data-fold-body="${esc(historyKey)}">
       ${historyList(ledger.history || [])}
+      </div>
     </div>
   </div>
 </section>`;
@@ -426,6 +448,7 @@ function viewLane(config, ledger, lane) {
     )
     .join("");
 
+  const historyKey = "history-lane-" + lane.key;
   return `<section class="view" data-view="lane-${lane.key}" id="${viewId("lane:" + lane.key)}">
   <div class="details-main">
     <div class="kicker">${esc(lane.label)}</div>
@@ -435,8 +458,14 @@ function viewLane(config, ledger, lane) {
     ${blocks}
     ${legend(config, lane)}
     <div class="history" data-history-section>
-      <div class="section-head"><h2>${esc(config.labels.historyTitle)}</h2><span class="history-sub" data-default="只列与${esc(lane.label)}相关的记录" aria-live="polite">只列与${esc(lane.label)}相关的记录</span></div>
+      ${sectionHead({
+        title: esc(config.labels.historyTitle),
+        meta: `<span class="history-sub" data-default="只列与${esc(lane.label)}相关的记录" aria-live="polite">只列与${esc(lane.label)}相关的记录</span>`,
+        key: historyKey,
+      })}
+      <div data-fold-body="${esc(historyKey)}">
       ${historyList(ledger.history || [], [lane.prefix])}
+      </div>
     </div>
   </div>
 </section>`;
@@ -459,9 +488,10 @@ function viewClosed(config, ledger) {
       const kinds = stages
         .map((s) => `${esc(s.label)} ${items.filter((i) => s.statuses.includes(i.status)).length}`)
         .join(" · ");
+      const secKey = "closed-" + lane.key;
       return `<section class="detail-group" id="stage-${lane.key}-closed">
-  <div class="section-head"><h2>${esc(lane.label)} · 已收口</h2><span>${kinds} · 共 ${items.length} 项</span></div>
-  ${items.map((i) => itemCard(config, lane, i, { collapsed: true })).join("")}
+  ${sectionHead({ title: esc(lane.label) + " · 已收口", meta: `${kinds} · 共 ${items.length} 项`, key: secKey })}
+  <div data-fold-body="${esc(secKey)}">${items.map((i) => itemCard(config, lane, i, { collapsed: true })).join("")}</div>
 </section>`;
     })
     .filter(Boolean)
@@ -477,8 +507,8 @@ function viewClosed(config, ledger) {
         .map((s) => `${esc(s.label)} ${items.filter((i) => s.statuses.includes(i.status)).length}`)
         .join(" · ");
       solved = `<section class="detail-group" id="stage-feature-closed">
-  <div class="section-head"><h2>已解决</h2><span>${kinds} · 共 ${items.length} 项</span></div>
-  ${items.map((i) => itemCard(config, featureLane, i, { collapsed: true })).join("")}
+  ${sectionHead({ title: "已解决", meta: `${kinds} · 共 ${items.length} 项`, key: "closed-feature" })}
+  <div data-fold-body="closed-feature">${items.map((i) => itemCard(config, featureLane, i, { collapsed: true })).join("")}</div>
 </section>`;
     }
   }
@@ -756,9 +786,11 @@ function overlays(config) {
 function workbenchBlock() {
   return `<div class="workbench" data-workbench>
   <div class="workbench-head">
+    <button class="section-fold" type="button" aria-expanded="true" data-fold="workbench" aria-controls="wb-body" aria-label="收起「工作台」" title="收起这一块"></button>
     <h3>工作台</h3>
     <span class="workbench-desc">拖动卡片排出执行顺序（上面先做）→ 选串行还是并行 → 点「分析」→ 确认后「开始」。机器逐张领活、交给 Harness、取回结论后自动交还推进。</span>
   </div>
+  <div class="workbench-body" id="wb-body" data-fold-body="workbench">
   <div class="workbench-controls">
     <div class="workbench-pool" data-wb-pool>
       <!-- 卡片候选池：拖拽排序的执行队列，由 client.js 依据 plan 动态铺 -->
@@ -794,6 +826,7 @@ function workbenchBlock() {
       <span class="wb-run-progress" data-wb-progress></span>
     </div>
     <ol class="workbench-steps" data-wb-steps></ol>
+  </div>
   </div>
 </div>`;
 }
