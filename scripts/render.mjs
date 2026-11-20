@@ -291,8 +291,8 @@ function viewSkills(config, ledger) {
 
   return `<section class="view" data-view="skills" id="${viewId("skills")}">
   <div class="details-main">
+    <!-- 大标题「Skill 台账」也删了（2026-11-20）：kicker 那行「Skill 统计 · …」已经说明。 -->
     <div class="kicker">Skill 统计 · ${esc(config.labels.skillsTitle || "Agent 用过的与产出的")}</div>
-    <h1 class="details-title">Skill 台账</h1>
     <div class="stage-board">
       <div class="stage-board-total"><span class="stage-board-num">${total}</span><span class="stage-board-label">共 ${total} 个 Skill</span></div>
       <div class="stage-board-table" style="grid-template-columns:repeat(3,1fr)">
@@ -482,8 +482,12 @@ function viewLane(config, ledger, lane) {
   const historyKey = "history-lane-" + lane.key;
   return `<section class="view" data-view="lane-${lane.key}" id="${viewId("lane:" + lane.key)}">
   <div class="details-main">
+    <!-- 2026-11-20 用户定：「需求 / 按阶段推进 这种没有实际意义的大标题不要加上」。
+         三个页面的 h1 大标题都删了 —— 上一行 kicker 已经写明这是哪个车道
+         （需求 / 问题 / 风险），下面那行「按阶段推进」对每个车道都一模一样，
+         提供不了任何新信息，只是把内容往下推。
+         ⚠️ 别把 kicker 一起删了：现在是页面唯一的身份标识。 -->
     <div class="kicker">${esc(lane.label)}</div>
-    <h1 class="details-title">按阶段推进</h1>
     ${stageBoard(lane, items, closedLanes, closedIds)}
     ${lanePendingBlock(config, ledger, lane)}
     ${blocks}
@@ -551,8 +555,9 @@ function viewClosed(config, ledger) {
 
   return `<section class="view" data-view="closed" id="${viewId("closed")}">
   <div class="details-main">
+    <!-- 大标题「收口记录」也删了（2026-11-20，和三个车道页一起）：
+         kicker 那行「已修复 / 已关闭 / 暂停」已经把这个页说清楚了。 -->
     <div class="kicker">已修复 / 已关闭 / 暂停</div>
-    <h1 class="details-title">收口记录</h1>
     ${closedBoard(config, ledger)}
     ${body}
     ${emptyState}

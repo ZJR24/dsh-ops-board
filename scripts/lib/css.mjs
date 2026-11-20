@@ -272,7 +272,9 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 /* 收起来时标题右侧仍要能看出这一块有多少东西，不然只剩一个名字 */
 .section-head.is-collapsed{opacity:.72}
 .details-main{padding:22px 0 24px}
-.details-title{font-size:clamp(30px,3.5vw,42px);line-height:1.22;letter-spacing:-.01em;margin:0 0 8px}
+/* .details-title 已删除（2026-11-20）：三个详情页的 h1 大标题（「按阶段推进」/
+   「收口记录」/「Skill 台账」）都去掉了，那行字对每个页面都一样、提供不了信息，
+   只是把内容往下推。删样式是为了不留孤儿规则（verify-board 的孤儿样式检查会报）。 */
 .detail-group{padding:18px 0 4px}
 .stage-tail{border-top:1px dotted var(--rule2);border-bottom:1px solid var(--rule);padding:9px 0;margin:6px 0 2px;font-size:12px;color:var(--muted)}
 .stage-tail b{color:var(--ink)}

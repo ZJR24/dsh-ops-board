@@ -53,6 +53,8 @@ const SUITES = [
   { name: "risk-mitigating-practise", file: "risk-mitigating-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "cell-target-cyber", file: "cell-target-test.mjs", args: ["--board", CYBER], why: "阶段格子落点与目标分组标题对得上（大看板）" },
   { name: "cell-target-practise", file: "cell-target-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
+  { name: "no-details-title-cyber", file: "no-details-title-test.mjs", args: ["--board", CYBER], why: "详情页没有无意义大标题（大看板）" },
+  { name: "no-details-title-practise", file: "no-details-title-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
   { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },
