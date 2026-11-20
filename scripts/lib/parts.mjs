@@ -161,10 +161,21 @@ export function railLanePanel(config, ledger, lane) {
     .map((s) => `${esc(s.label)} <b>${counts[s.key]}</b>`)
     .join(" | ");
   const grid = lane.stages
-    .map(
-      (s) =>
-        `<a href="#stage-${lane.key}-${s.key}" title="跳到 ${esc(s.label)} 分节"><span class="stage-num">${counts[s.key]}</span><span class="stage-label">${esc(s.label)}</span></a>`
-    )
+    .map((s) => {
+      // 和车道页状态表同一个判据：已收口阶段的卡片在收口页。
+      // 但收口页只在**真有收口条目**时才渲染那一组 —— 没有的时候不能给链接，
+      // 否则是死链（practise 板 0 收口就是这个情况）。
+      const hasClosedGroup = itemsOfLane(ledger, lane.key).some((i) => isClosedLaneItem(lane, i));
+      const body = `<span class="stage-num">${counts[s.key]}</span><span class="stage-label">${esc(s.label)}</span>`;
+      if (s.open === false && !hasClosedGroup) {
+        return `<span class="is-static">${body}</span>`;
+      }
+      const anchor = s.open === false ? `stage-${lane.key}-closed` : `stage-${lane.key}-${s.key}`;
+      const title = s.open === false
+        ? `跳到「${esc(lane.label)} · 已收口」（卡片在收口页）`
+        : `跳到 ${esc(s.label)} 分节`;
+      return `<a href="#${anchor}" title="${title}">${body}</a>`;
+    })
     .join("");
 
   const openStages = lane.stages.filter((s) => s.open);
@@ -436,6 +447,27 @@ export function sectionHead({ title, meta = "", bodyId = "", key = "", askBtn = 
 
 // ── 分节 ──
 
+/**
+ * 这一阶段的分节还要不要在**车道页**上渲染？
+ *
+ * 2026-11-20 用户定：「已上线，或者其他页面上的这样的标题都移动到已解决/暂停页面里去了，
+ * 把已经不显示数据的这几个标题去掉」。
+ *
+ * 判据只有一条：**已收口阶段（`stage.open === false`）的卡片全在收口页**，
+ * 车道页上那一节只剩一行「这 N 项已收口，卡片都在 …」的链接 ——
+ * 那就是一个空壳标题。直接不渲染。
+ *
+ * 两种**必须留着**的情况：
+ *   ① `stage.open === true`（待解决 / 待验证 / 计划中 / 开发中 / 观察中 / 缓解中）——
+ *      车道页就是干活的地方，哪怕是 0 项，「这一阶段暂时没有…」也是有效信息；
+ *      而且「计划中」旁边还挂着「和 AI 谈谈要加什么」按钮，空着才是它的常态。
+ *   ② 调用方显式要求保留（`keepEmpty`），给以后别的用途留个口子。
+ */
+export function shouldRenderStageSection(lane, stage, options = {}) {
+  if (options.keepEmpty) return true;
+  return stage.open !== false;
+}
+
 export function stageBlock(config, lane, stage, items, options = {}) {
   const list = sortItems(lane, items.filter((i) => stage.statuses.includes(i.status)));
   // 分节标题右侧的入口按钮（目前只有「计划中」用它谈新增功能）。
@@ -469,14 +501,48 @@ export function stageBlock(config, lane, stage, items, options = {}) {
 </section>`;
 }
 
-export function stageBoard(lane, items) {
+// 哪些车道**真的有收口条目**（收口页才会渲染 `#stage-<lane>-closed` 那一组）。
+//
+// 这个判据是给「状态表格子能不能点」用的：车道页上已收口阶段的格子本该跳到
+// 收口页的对应分组，但如果那块板一条收口的都没有（practise 就是 0），
+// 收口页压根不渲染那个分组 —— 格子指过去就是死链。
+// closeBoard 里早就写了同一条规则（「格子只在那一格有数时才做成链接」），
+// 这里把它提出来，让车道页的状态表和侧栏阶段表共用同一个判据。
+export function lanesWithClosed(config, ledger) {
+  const out = new Set();
+  for (const lane of config.lanes) {
+    const has = itemsOfLane(ledger, lane.key).some((i) => isClosedLaneItem(lane, i));
+    if (has) out.add(lane.key);
+  }
+  return out;
+}
+
+// 车道页顶部那块状态表。
+//
+// 格子的落点分两种（2026-11-20 用户定：「跳转到收口页的相应行」）：
+//   · **未收口阶段** → 跳本页的分节（`#stage-<lane>-<stage>`），那里有卡片可筛；
+//   · **已收口阶段** → 跳**收口页**对应的分组（`#stage-<lane>-closed`）。
+//     这些阶段的卡片全在收口页，车道页上那节已经不渲染了（见 shouldRenderStageSection），
+//     指回本页就是死链 —— verify-board 第 7 条会报。
+//
+// 注意同一车道的多个收口阶段指向**同一个**分组（需求的「已上线」「暂停」都归「已解决」那组），
+// 和收口页那块合并状态表的语义保持一致：点任一格看到的是整组，不是单个状态。
+export function stageBoard(lane, items, closedLanes) {
   const counts = countOfLane(lane, items);
   const openN = openCountOfLane(lane, items);
+  // 这块板有没有收口条目 —— 没有的话收口页不会渲染 #stage-<lane>-closed，
+  // 已收口那几格就只能做静态数字，否则是死链（verify-board 第 7 条会报）。
+  const hasClosedGroup = closedLanes ? closedLanes.has(lane.key) : true;
   const cells = lane.stages
-    .map(
-      (s) =>
-        `<a class="stage-board-cell" href="#stage-${lane.key}-${s.key}"><b>${counts[s.key]}</b><span>${esc(s.label)}</span></a>`
-    )
+    .map((s) => {
+      const label = `<b>${counts[s.key]}</b><span>${esc(s.label)}</span>`;
+      if (s.open === false && !hasClosedGroup) {
+        // 收口页没那一组：不给链接。和 closedBoard 对 0 项格子的处理保持一致。
+        return `<span class="stage-board-cell is-static">${label}</span>`;
+      }
+      const anchor = s.open === false ? `stage-${lane.key}-closed` : `stage-${lane.key}-${s.key}`;
+      return `<a class="stage-board-cell" href="#${anchor}">${label}</a>`;
+    })
     .join("");
   return `<div class="stage-board">
   <div class="stage-board-total"><span class="stage-board-num">${openN}</span><span class="stage-board-label">${esc(lane.openNoun)}</span></div>

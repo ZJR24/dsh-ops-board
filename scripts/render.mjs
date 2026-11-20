@@ -36,6 +36,8 @@ import {
   stageBlock,
   stageBoard,
   closedBoard,
+  shouldRenderStageSection,
+  lanesWithClosed,
   legend,
   historyList,
   openIndexLines,
@@ -429,12 +431,15 @@ function lanePendingBlock(config, ledger, lane) {
 
 function viewLane(config, ledger, lane) {
   const items = itemsOfLane(ledger, lane.key);
+  // 这块板哪些车道真有收口条目 —— 决定已收口阶段的格子能否指到收口页的分组。
+  const closedLanes = lanesWithClosed(config, ledger);
   // 「计划中」这一阶段右侧的入口：谈的是「要加什么功能」，作用域是需求车道。
   // 只在需求车道的 planned 阶段挂，其它车道各阶段的标题栏保持原样。
   const plannedKey = lane.key === "feature"
     ? (lane.stages.find((st) => st.key === "planned") || {}).key
     : null;
   const blocks = lane.stages
+    .filter((st) => shouldRenderStageSection(lane, st))
     .map((st) =>
       stageBlock(
         config,
@@ -453,7 +458,7 @@ function viewLane(config, ledger, lane) {
   <div class="details-main">
     <div class="kicker">${esc(lane.label)}</div>
     <h1 class="details-title">按阶段推进</h1>
-    ${stageBoard(lane, items)}
+    ${stageBoard(lane, items, closedLanes)}
     ${lanePendingBlock(config, ledger, lane)}
     ${blocks}
     ${legend(config, lane)}

@@ -50,6 +50,8 @@ const SUITES = [
   { name: "section-fold-practise", file: "section-fold-test.mjs", args: ["--board", PRACTISE], why: "每个大标题模块都能收起（小看板）" },
   { name: "masthead-size-cyber", file: "masthead-size-test.mjs", args: ["--board", CYBER], why: "报头大标题尺寸与各宽度不挤（大看板）" },
   { name: "masthead-size-practise", file: "masthead-size-test.mjs", args: ["--board", PRACTISE], why: "报头大标题尺寸与各宽度不挤（小看板）" },
+  { name: "closed-section-cyber", file: "closed-section-test.mjs", args: ["--board", CYBER], why: "车道页不再渲染已收口分节 / 格子跳收口页（大看板）" },
+  { name: "closed-section-practise", file: "closed-section-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "stage-ask-cyber", file: "stage-ask-test.mjs", args: ["--board", CYBER], why: "「计划中」AI 入口 + 待处理表已搬到车道页" },
   { name: "stage-ask-practise", file: "stage-ask-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板，计划中同样是 0 项）" },
 
