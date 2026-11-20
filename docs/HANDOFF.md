@@ -2,6 +2,7 @@
 
 > 写给下一个窗口的自己。读完这份就能直接接手，不用翻历史对话。
 > 生成时间：2026-11-17 09:5x（Asia/Shanghai）
+> 更新：2026-11-20 **四十三改 —— 「跑完了」≠「做成了」**（参考 agent-autoloop 的「没跑成要重派」）。`workbenchPump` 原来无条件 `done = true`，于是「Agent 回了一句话但没动台账」和「真收口了」长得一模一样。现在分三种：真收口→done；状态没动→tries+1 重派；连试 3 次→**红条 stuck「等你看看」**，不再假装成功也不再无限烧 Token。⚠️ 顺带挖出两个真 bug：① `D.items[id].status` **一直是 undefined**（`itemVars` 只给中文 `statusLabel`，没给原始 `status`）→ `moved` 恒 false；② `lr.items[id]` 拿**数组当对象索引**（`/api/board` 的 items 是数组）→ 永远读不到。两个叠在一起，说明「回读台账验证」从写下那天起就没生效过。现在统一走 `itemStatusFromBoard()`。测试也补了自动收口器（以前只回话不干活）+ 段间/退出前 `restoreLedger()`（否则跑一次测试就把看板卡全标成已修复）。新增 `wb-tries-test.mjs`（10 项，真的跑执行链：不改台账→3 次后标红 / 改了→1 次成功）。
 > 更新：2026-11-20 **四十二改 —— 工作台折叠箭头不旋转**。折叠状态按「按钮所在的标题容器」加 class：普通模块加在 `.section-head`、工作台加在 `.workbench-head`（它没有 `.section-head`）。旋转规则只写了前者，于是工作台那颗按钮永远指向下 —— 内容收起来了但箭头不给反馈。补上 `.workbench-head.is-collapsed` 选择器。⚠️ 写测试时踩到两处**读动画属性的坑**：`.section-fold::after` 有 `transition: .15s`，点击后同步读 `getComputedStyle` 拿到的是起始帧（还是 45°），必须等 ≥350ms；也不能在一个表达式里加 class 就立刻读。新增 `fold-rotate-test.mjs`（12 项，读 transform 矩阵用 atan2 换算角度，实测 45°→-45°）。
 > 更新：2026-11-20 **四十一改 —— 处理记录：筛选条与首条记录加间距**。用户报「标签和最后一条记录之间的间隔有点小」，实测是 **0px**：筛选条 `.legend-line` 的 `padding-top:8px` 是它自己内部的上边距，管不到下面；`.timeline` 又是 `margin:0`，两者严丝合缝贴着。给 `.timeline` 加 `margin-top:10px`，实测 0→10px。单看 CSS 每条都"有间距"、合起来是零 —— 这类问题只有量矩形才看得出来。新增 `history-gap-test.mjs`（量矩形，要求 8~24px；只有一种记录类型或该车道无记录时正确跳过）。
 > 更新：2026-11-20 **四十改 —— 删掉详情页的「没实际意义的大标题」**。三个车道页的「按阶段推进」、收口页的「收口记录」、Skill 页的「Skill 台账」全部删除 —— 它们要么对所有页面都一样，要么只是把上一行 kicker 换个说法再说一遍，`clamp(30px,3.5vw,42px)` 的大字白占一块高度。⚠️ **kicker 必须留着**（删掉 h1 后它是页面唯一的身份标识）；`.details-title` 的 CSS 规则一并删，否则是孤儿样式。新增 `no-details-title-test.mjs`（9 项，含「kicker 的下一个兄弟就是状态表」这条防半成品的断言）。
@@ -1126,6 +1127,76 @@ const claimsPath = resolve(argValue("claims") || join(ROOT, "flow-claims.json"))
   这次只是把它的**含义**从「划分窗口」纠正成「划分一条队列里的投喂节奏」。
 
 
+**2026-11-20 四十三改（「跑完了」≠「做成了」；顺带挖出两个真 bug）**
+
+起因：看了 [KKKKhazix/agent-autoloop](https://github.com/KKKKhazix/agent-autoloop)（6111★），
+它的核心一句是「Agent 没跑成 → 过几分钟重派，每次翻倍，连续第 3 次才告诉你」。
+对照我们自己的代码，发现我们**把「跑完了」直接当成「做成了」**。
+
+#### 改动
+
+`workbenchPump` 里原来无条件 `next.o.done = true`。现在分成三种结局：
+
+| 情形 | 判定 | 界面 |
+|---|---|---|
+| 状态**离开**未收口集合 | 真做成，`done` | 绿条（划掉标题） |
+| 状态没动 | 没做成，`tries+1`，稍后重派 | 灰条「第 N 次没做成，稍后重试」 |
+| `tries >= 3` | 停下来等人 | **红条**「试了 3 次没做成，等你看看」 |
+
+上限 3：每次重试都真花钱，而「同一张卡 3 次都改不动台账」基本已经不是抖动，
+而是卡在某个要人判断的地方了 —— 那时候该人来拍板。
+路批量分支（`finishLaneBatch`）同样处理，且**没做成的卡不推进 laneCursor**，
+否则那一路会跳过它们。
+
+#### ⚠️ 挖出的第一个 bug：`D.items[id].status` 一直是 undefined
+
+`client.js` 里判断「状态动没动」要读 `D.items[id].status`，但 `D.items` 是
+`context.mjs` 的 `itemVars()` 生成的**展示结构** —— 它**只有中文 `statusLabel`，
+没有原始 `status`**。所以 `prev` 永远是空串、`moved` 恒为 false。
+
+**这意味着「回读台账看状态变没变」那一步，从写下那天起就没生效过。**
+现在 `itemVars()` 补上了 `status: item.status`。
+
+#### ⚠️ 挖出的第二个 bug：`lr.items[id]` 拿数组当对象索引
+
+`getLedgerBoard` 读的 `/api/board` 返回的是**ledger.json 原文**，它的 `items` 是**数组**。
+而代码写的是 `lr.items[id]` —— 字符串下标取数组，永远是 `undefined`。
+
+两个 bug 叠在一起，`afterStatus` 恒为空、`closed` 恒为 false。
+现在统一走 `itemStatusFromBoard(board, id)`（按数组 `find`）。
+
+> **教训：这两处都是「读一个不存在的字段」——不报错、不抛异常，只是永远拿到 undefined。**
+> 判断「状态有没有变」这种逻辑，必须**用真实数据验一次**，
+> 光看代码「它应该会读到」是不够的。
+
+#### 测试要跟着改（它模拟的 Agent 太敷衍了）
+
+`flow-workbench-test` 原来只回一句 answer、**不动台账**。在新规矩下每张卡都会被重试
+3 次，ask 次数变 3 倍，一批断言全挂 —— 那不是引擎坏了，是模拟的 Agent 不干活。
+
+加了自动收口器 `closeCardsInLedger()`：每轮驱动时先从 ask 的 prompt 里正则捞真实卡号
+（**不能拿 `body.item`，那是复用键**：lane.key / 「执行台」/「整批全交」），
+把那些卡在台账里改成该车道的收口状态，再回答案。
+
+两个配套细节：
+- **段间要 `restoreLedger()`**：前一段真把卡收口了，后一段就「没有可开工的卡」了。
+- **退出前也要 `restoreLedger()`**：否则跑一次测试就把看板上的卡全标成已修复了。
+  （实测确认：加这条之前，跑完测试演练卡全变 fixed/shipped/resolved。）
+
+**新增测试** `scripts/wb-tries-test.mjs`（进 gate，10 项）：
+真的跑执行链，只控制「Agent 改不改台账」：
+- 场景 A 只回话不改 → 断言 **ask ≥ 3 次、tries=3、stuck=true、红条、日志写了原因**；
+- 场景 B 回话同时把状态改成 fixed → 断言 **只 ask 1 次、没被误判成 stuck、tries ≤ 1**。
+
+> 场景 B 的断言刻意**不断言「绿色完成态」**：卡改成 fixed 之后 `buildPlan` 就不再把它
+> 列进可开工清单（它已收口），pump 重试 claim 会一直拿到「不在可开工清单里」最终搁置 ——
+> 那是**正确行为**，不是 bug。真正要验的是「没被误判成做不成」。
+
+**回归**：`wb-tries` **10/0**、`flow-workbench` **101/0**（就 77→101 那批）；
+`npm run gate` **52 通过 / 0 失败（478.6s）**；
+双板 `verify-board` 通过（cyber 1008.3 KB / practise 454.4 KB）。
+
+
 **2026-11-20 四十二改（工作台的折叠箭头不旋转）**
 
 用户原话：
@@ -2216,10 +2287,10 @@ node scripts\<测试名>.mjs --board "D:\WorkSpace-Tools\ops-board-reports\<看�
 ⚠️ `float-negative.mjs` / `chatwin-negative.mjs` **故意没进 gate**：它们是负向验收，会临时改坏
 `client.js`/`css.mjs` 再还原，中途被打断会留下坏源码。
 
-### 5.2 基线（全部绿，2026-11-20 四十二改后实测）
+### 5.2 基线（全部绿，2026-11-20 四十三改后实测）
 
-**总基线：`npm run gate` → 51 通过 / 0 失败（288.3–288.6s 二十一改 / 290.6s 二十二改 / 289.1s 二十二改补 / 288.2s 二十三改 / 284.9s 二十三改补 / 284.5s 二十四改 / 284.7s 二十四改补 / 298.8s 二十五改 / 321.1s 二十六改 / 293.2s 二十七改 / 303.6s 二十九改 / 324.2s 三十改 / 348.4s 三十一改 / 339.1s 三十二改 / 347.7s 三十三改 / 365.7s 三十四改 / 380.5s 三十五改 / 378.1s 三十六改 / 383.3s 三十七改 / 389.5s 三十八改 / 401.6s 三十九改 / 402.9s 四十改 / 433.1s 四十一改 / **443.4s 四十二改**）；`npm test`（--fast）→ 14 通过 / 0 失败（约 188s）。**
-**另需人工跑 `npm run uitest`（双板）→ 交互验收通过** —— 它不在 gate 的 51 项里，改渲染相关的东西必须单独跑。
+**总基线：`npm run gate` → 52 通过 / 0 失败（288.3–288.6s 二十一改 / 290.6s 二十二改 / 289.1s 二十二改补 / 288.2s 二十三改 / 284.9s 二十三改补 / 284.5s 二十四改 / 284.7s 二十四改补 / 298.8s 二十五改 / 321.1s 二十六改 / 293.2s 二十七改 / 303.6s 二十九改 / 324.2s 三十改 / 348.4s 三十一改 / 339.1s 三十二改 / 347.7s 三十三改 / 365.7s 三十四改 / 380.5s 三十五改 / 378.1s 三十六改 / 383.3s 三十七改 / 389.5s 三十八改 / 401.6s 三十九改 / 402.9s 四十改 / 433.1s 四十一改 / 443.4s 四十二改 / **478.6s 四十三改**）；`npm test`（--fast）→ 14 通过 / 0 失败（约 188s）。**
+**另需人工跑 `npm run uitest`（双板）→ 交互验收通过** —— 它不在 gate 的 52 项里，改渲染相关的东西必须单独跑。
 
 | 套件 | 结果 | 说明 |
 |---|---|---|
@@ -2231,6 +2302,7 @@ node scripts\<测试名>.mjs --board "D:\WorkSpace-Tools\ops-board-reports\<看�
 | `flow-workbench-run-test.mjs` | **10 / 0** | 工作台执行驱动器：claim/互斥/收口/串行逐件顺序/并行铺多路（独立双 phase，端口 8797/8798）。**2026-11-18 修正**：选卡走真实点击（点备选卡）、先选模式再点分析、并轮询等分析结果——原先直接改 `WB.dragPool` 绕过 UI，按钮一直是 `disabled`，`.click()` 不派发事件。**2026-11-20 修正**：不再断言「恰好 3 张」——台账被真实收口收到只剩 1 张未收口时，这条会恒红（数据变了，不是引擎坏了）；改成「排进去几张就断言几张」 |
 | `feature-planlist-test.mjs` | **18 / 0**（cyber）**18 / 0**（practise） | 三十七改：需求页「计划列表」——是一张 `.table-wrap > table`、**行数从 `ledger.json` 现算**、排在状态表之后第一个阶段分节之前、列齐全、计数用「待推进」；两个 AI 入口**真点第二个**确认不是死按钮；「计划列表」只在需求页 |
 | `nav-switch-test.mjs` | **9 / 0** | 三十五改：六个导航项逐个点都能切；**人为制造「视图=closed / hash=lane-bug」后点导航必须切过去**（修复前会毫无反应）；阶段筛选后 hash 已同步；连点六项最后一项生效 |
+| `wb-tries-test.mjs` | **10 / 0** | 四十三改：跑完了 ≠ 做成了 —— 真的跑执行链：不改台账 → 重试 3 次后 `stuck` 标红（ask ≥3、tries=3）；改了台账 → 只 ask 1 次、不误判成 stuck |
 | `fold-rotate-test.mjs` | **12 / 0**（cyber）**12 / 0**（practise） | 四十二改：折叠按钮的箭头随收放旋转 —— **读 `::after` 的 transform 矩阵、用 atan2 换算角度**（不是看 CSS 文本），实测 45°→-45°；工作台与普通模块两种容器各自验。⚠️ 读动画属性必须 `await wait(350)`（transition .15s），否则拿到起始帧假红 |
 | `history-gap-test.mjs` | **5 / 0**（cyber）**2 / 0**（practise） | 四十一改：处理记录筛选条与首条记录间距 — 量矩形差值，要求 **8~24px**（下限防贴在一起、上限防改过头）。只有一种记录类型不渲染筛选条、该车道无记录不渲染时间线时正确跳过 |
 | `no-details-title-test.mjs` | **9 / 0**（cyber）**9 / 0**（practise） | 四十改：五个详情页都没有 `h1` / `.details-title`；kicker 仍在且有文字（删掉 h1 后它是唯一身份标识）；kicker 的下一个兄弟**就是** `.stage-board` 且间距 <24px；`css.mjs` 里没有 `.details-title` 规则 |

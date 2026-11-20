@@ -4,7 +4,7 @@
 //   3) 勾选 + 分析 → 得到串/并行两种建议，步骤区铺出来
 //   4) 串行/并行顺序与 area 约束一致（同区域互斥；并行分轮）
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -107,6 +107,58 @@ await wait(3500);
 let pass = 0, fail = 0;
 const ok = (c, msg, extra) => { if (c) { pass++; console.log("  ✓ " + msg + (extra ? " — " + extra : "")); } else { fail++; console.log("  ✗ " + msg + (extra ? " — " + extra : "")); } };
 const ev = async (expr) => (await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true })).result?.value;
+
+// ── 自动收口器（2026-11-20 加）──────────────────────────────────────
+//
+// 工作台现在会**回读台账验证这张卡是不是真收口了**（三十九改起的规矩）：
+//   · 收口了 → 记完成，推进下一张；
+//   · 没动   → 当成"跑完了但没做成"，重试，3 次后标红。
+//
+// 而这条测试以前只回一句 answer、**不动台账** —— 于是在新规矩下每张卡都会被
+// 重试 3 次，ask 次数变成 3 倍，断言全挂（"整批只触发一次 ask — asks=3"）。
+// 那不是引擎坏了，是测试模拟的 Agent 太敷衍：一个真 Agent 收口了就该改台账。
+//
+// 所以在 Node 侧补一个收口器：测试每轮驱动时把「已问过的卡」在 ledger.json 里
+// 改成该车道的收口状态，让上下文和真 Agent 干完活一致。
+// ⚠️ 用独立副本？这里沿用原测试的做法（直接改 BOARD）—— 它跑完会把自己的改动留着，
+//    而 card 状态本来就是测试数据的一部分；不想污染就按 --board 指一块临时板。
+const LEDGER_PATH = join(BOARD, "ledger.json");
+const CONFIG_PATH = join(BOARD, "board.config.json");
+const cfgCache = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+// 车道 → 它的第一个「已收口」阶段的第一个状态（如 bug→fixed、feature→shipped）
+const CLOSE_STATUS = {};
+for (const lane of cfgCache.lanes || []) {
+  for (const st of lane.stages || []) {
+    if (st.open === false && Array.isArray(st.statuses) && st.statuses.length) {
+      CLOSE_STATUS[lane.key] = st.statuses[0];
+      break;
+    }
+  }
+}
+function closeCardsInLedger(ids) {
+  if (!ids || !ids.length) return 0;
+  let led;
+  try { led = JSON.parse(readFileSync(LEDGER_PATH, "utf8")); } catch { return 0; }
+  let n = 0;
+  for (const id of ids) {
+    const it = (led.items || []).find((x) => x && x.id === id);
+    if (!it) continue;
+    const want = CLOSE_STATUS[it.lane];
+    if (!want || it.status === want) continue;
+    it.status = want;
+    n++;
+  }
+  if (n) writeFileSync(LEDGER_PATH, JSON.stringify(led, null, 2), "utf8");
+  return n;
+}
+
+// 台账原样快照。逐段测试之间要**恢复**它 ——
+// 否则前一段把卡收口了，后一段就"没有可开工的卡"（这正是自动收口器引入的新问题：
+// 原来只回话不动台账，卡一直挂着，后面还能继续用；现在真收口了，用完就没了）。
+const LEDGER_ORIGINAL = readFileSync(LEDGER_PATH, "utf8");
+function restoreLedger() {
+  writeFileSync(LEDGER_PATH, LEDGER_ORIGINAL, "utf8");
+}
 
 console.log("[1] 工作台 UI 存在");
 ok(await ev(`!!document.querySelector('[data-workbench]')`), "工作台容器在");
@@ -342,6 +394,11 @@ const wholeBatchQueued = await ev(`document.querySelectorAll('[data-wb-steps] .w
 ok(wholeBatchQueued === 0, "整批全交时没有卡标「排队中」（全部一次交给该窗口）", "实际 " + wholeBatchQueued + " 张");
 
 console.log("\n[5g] 分批真实执行：整批 claim → 交给 Agent → release → 卡片全部收口");
+// ⚠️ 这一段要真跑执行、要拿到「可开工的卡」—— 先把台账恢复成初始快照并刷新页面。
+// 不恢复的话，前面几段已经把卡收口了（自动收口器干的），这里会「没有可开工的卡」。
+restoreLedger();
+await send("Page.navigate", { url: B + "/#view-overview" });
+await wait(2600);
 
 // 关键：分批会按「同区域串行约束」claim —— serve 只放行「当前该区域可开工」的卡。
 // 因此本测试用「各自区域的头一件」（都可开工）做一批，让整批都能 claim 成功，
@@ -375,7 +432,9 @@ const stubResult = await ev(`(async function(){
     if (String(url).indexOf('/ops-board/ask') === 0 && opts && opts.method === 'POST'){
       var body = JSON.parse(opts.body); var askId = body.askId;
       window.__wbStub.asks++;
-      window.__wbStub.asked.push({ askId: askId, hasBatch: /本次交给你的卡片清单/.test(body.question), questionLen: (body.question||'').length, item: body.item, title: body.title });
+      window.__wbStub.asked.push({ askId: askId, hasBatch: /本次交给你的卡片清单/.test(body.question), questionLen: (body.question||'').length, item: body.item, title: body.title,
+        // 留着正文：自动收口器要从里面捞真实卡号（item 是复用键，不是卡号）
+        q: String(body.question || '') });
       return Promise.resolve({ ok: true, json: function(){ return Promise.resolve({ ok: true, askId: askId }); } });
     }
     return origFetch(url, opts);
@@ -386,10 +445,27 @@ const stubResult = await ev(`(async function(){
 await ev(`document.querySelector('[data-wb-start]').click(); 1`);
 
 // 持续驱动：每次有新 ask 就立刻回一条 ok 的 answer，直到全部批次完成（或超时）。
+// ⚠️ 回答案**之前**先把这些卡在台账里收口 —— 工作台会回读台账验证（三十九改），
+// 光回话不收口会被判"没做成"然后重试 3 次，ask 次数变成 3 倍。
 let askedSeen = 0;
-const driveDeadline = Date.now() + 12000;
+const driveDeadline = Date.now() + 20000;
 while (Date.now() < driveDeadline) {
   await wait(600);
+  // ① 先把「这一批问过的卡」在台账里收口（模拟真 Agent 干完活）
+  //
+  // ⚠️ 不能拿 `a.item` 当卡号：那是**复用键**（lane.key / 「执行台」/「整批全交」），
+  //    不是卡片编号。真正被处理的卡号在 prompt 正文里（「本次交给你的卡片清单」那段、
+  //    或者 - OPS-901 这种列表行），所以从 question 里正则捞。
+  const askedQuestions = JSON.parse(await ev(`JSON.stringify((window.__wbStub.asked.slice(${askedSeen}) || []).map(function(a){ return a.q || a.question || ''; }))`));
+  const idsInPrompt = new Set();
+  for (const q of askedQuestions) {
+    for (const m of String(q).matchAll(/\b([A-Z]{2,}-\d+)\b/g)) idsInPrompt.add(m[1]);
+  }
+  if (idsInPrompt.size) {
+    const closedN = closeCardsInLedger([...idsInPrompt]);
+    if (closedN) await wait(250);
+  }
+  // ② 再回答案
   const answersSent = await ev(`(function(){
     var sent = 0;
     window.__wbStub.asked.slice(${askedSeen}).forEach(function(a){
@@ -424,6 +500,11 @@ const batchPromptOk = await ev(`window.__wbStub.asked.some(function(a){ return a
 ok(batchPromptOk, "某次 ask 的 question 携带「本次交给你的卡片清单」且足够长（整批交给 Agent 自主）");
 
 console.log("\n[5h2] 并行真并发：多路同时开跑（用户报「选了并行却只给一个窗口」）；每批 2 张，同路内第二批要等");
+// ⚠️ 这一段要真跑执行、要拿到「可开工的卡」—— 先把台账恢复成初始快照并刷新页面。
+// 不恢复的话，前面几段已经把卡收口了（自动收口器干的），这里会「没有可开工的卡」。
+restoreLedger();
+await send("Page.navigate", { url: B + "/#view-overview" });
+await wait(2600);
 // 用户原话：「看板的工作台，选择了并行处理3个任务，但是没有给到两个对话窗口处理，而是给到一个窗口处理」。
 // 根因：旧实现把「一次喂几张」当成窗口划分依据，整批塞进固定会话键「本批 N 卡」——
 // 卡数一样时两批撞进同一个窗口，于是永远只有一个窗口。修复后窗口 = 路（area 前缀）。
@@ -469,7 +550,7 @@ await ev(`(function(){
     if (String(url).indexOf('/ops-board/ask') === 0 && opts && opts.method === 'POST'){
       var body = JSON.parse(opts.body);
       var st = window.__wbLanes;
-      st.asked.push({ askId: body.askId, item: body.item });
+      st.asked.push({ askId: body.askId, item: body.item, q: String(body.question || '') });
       var conc = Object.keys(window.__wb.inflight || {}).length;
       if (conc > st.maxConc) st.maxConc = conc;
       return Promise.resolve({ ok: true, json: function(){ return Promise.resolve({ ok: true, askId: body.askId }); } });
@@ -483,6 +564,11 @@ let laneSeen = 0;
 const laneDl = Date.now() + 20000;
 while (Date.now() < laneDl) {
   await wait(400);
+  // 先按 prompt 里的卡号把台账收口（工作台会回读验证，光回话不算做成）
+  const lq = JSON.parse(await ev(`JSON.stringify((window.__wbLanes.asked.slice(${laneSeen}) || []).map(function(a){ return a.q || ''; }))`));
+  const lids = new Set();
+  for (const q of lq) for (const m of String(q).matchAll(/\b([A-Z]{2,}-\d+)\b/g)) lids.add(m[1]);
+  if (lids.size) { closeCardsInLedger([...lids]); if (lids.size) await wait(200); }
   const n = await ev(`(function(){var a=window.__wbLanes.asked;var c=0;a.slice(${laneSeen}).forEach(function(x){window.postMessage({type:'ops-board/answer',askId:x.askId,ok:true,text:'已处理',by:'t'},'*');c++;});return c;})()`);
   laneSeen += n;
   const fin = await ev(`window.__wb.run === false`);
@@ -514,6 +600,11 @@ ok(laneRun.doneN === laneRun.totalN,
 }
 
 console.log("\n[5i] 并行 + 每批 1 张：**同一条队列里**同时只有 1 张在跑（路与路可以同时跑）");
+// ⚠️ 这一段要真跑执行、要拿到「可开工的卡」—— 先把台账恢复成初始快照并刷新页面。
+// 不恢复的话，前面几段已经把卡收口了（自动收口器干的），这里会「没有可开工的卡」。
+restoreLedger();
+await send("Page.navigate", { url: B + "/#view-overview" });
+await wait(2600);
 // 用户报「选了不分批（一张一张来），队列里还是会出现两张」——
 // 他看的是**一条队列**：同路第二张不该和头一张一起跑（它们抢同一块地）。
 // 2026-11-19 起语义更明确：窗口 = 路，「一次喂几张」只管路内批大小 ——
@@ -876,6 +967,11 @@ if (convKeyStable && convKeyStable.a1 && convKeyStable.a1 !== "(no export)") {
 }
 
 console.log("\n[5o] 正在处理中的卡留在「待执行队列」里，不该掉回备选");
+// ⚠️ 这一段要真跑执行、要拿到「可开工的卡」—— 先把台账恢复成初始快照并刷新页面。
+// 不恢复的话，前面几段已经把卡收口了（自动收口器干的），这里会「没有可开工的卡」。
+restoreLedger();
+await send("Page.navigate", { url: B + "/#view-overview" });
+await wait(2600);
 // 用户报：「正在处理的任务，没有再处理队列里，还在备选里」。
 // 根因是 workbenchRefresh 合并候选池时把 state==='running' 的卡过滤掉了，
 // 于是别人一领走，这张卡就从队列里消失、又被备选那半边收进去。
@@ -922,6 +1018,11 @@ console.log("\n[5o] 正在处理中的卡留在「待执行队列」里，不该
 }
 
 console.log("\n[5p] 串行：所有卡交给**同一个**固定窗口「执行台」并复用（不是每张新开一个）");
+// ⚠️ 这一段要真跑执行、要拿到「可开工的卡」—— 先把台账恢复成初始快照并刷新页面。
+// 不恢复的话，前面几段已经把卡收口了（自动收口器干的），这里会「没有可开工的卡」。
+restoreLedger();
+await send("Page.navigate", { url: B + "/#view-overview" });
+await wait(2600);
 // 用户问：「除了调度台，其他对话会复用吗，我希望是可以的」。
 // 串行以前 fresh=true + 会话键回落成卡 id → N 张卡开 N 个窗口，一个都不复用。
 // 现在：会话键固定「执行台」、fresh=false → N 张卡进同一条会话。
@@ -1094,6 +1195,12 @@ console.log("\n[5r] 演练模式：只回话、不动台账；默认关");
 
 console.log("\n[6] 服务没崩");
 ok(!/Error|throw/.test(stderr), "stderr 干净", stderr.slice(0, 120) || "(空)");
+
+// 收尾：把台账恢复成开工前的快照。
+// 这条测试现在会真的改台账（自动收口器，因为工作台要回读验证「真收口了没」），
+// 不恢复的话，跑一次测试就把看板上的卡全标成已修好了 —— 下一轮测试和用户看到的都是脏数据。
+// 这也是为什么 `restoreLedger()` 既在段间调用、也要在退出前调用一次。
+restoreLedger();
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 ws.close(); proc.kill(); srv.kill();

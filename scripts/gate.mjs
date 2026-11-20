@@ -59,6 +59,7 @@ const SUITES = [
   { name: "history-gap-practise", file: "history-gap-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板，记录太少会跳过）" },
   { name: "fold-rotate-cyber", file: "fold-rotate-test.mjs", args: ["--board", CYBER], why: "折叠按钮箭头随收放旋转（大看板）" },
   { name: "fold-rotate-practise", file: "fold-rotate-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
+  { name: "wb-tries", file: "wb-tries-test.mjs", args: [], why: "跑完了 ≠ 做成了：没改台账要重试，3 次才标红" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
   { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },

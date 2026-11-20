@@ -567,6 +567,13 @@ tbody tr:hover{background:var(--surface)}
 .wb-step-done{border-left-color:var(--green)}
 .wb-step-done .wb-step-title{text-decoration:line-through;color:var(--muted)}
 .wb-step-skip{border-left-color:var(--red);opacity:.6}
+/* 「试了几次都没做成，等你看看」（2026-11-20）。
+   它和 done 必须**一眼分得开** —— 以前的毛病正是「没做成」被记成「完成」，
+   一排绿条里混着几张假的。这里用红边 + 淡红底 + 不划掉标题：
+   划掉（done 的做法）意味着"这件事过去了"，而这张卡是"卡住了等你"。 */
+.wb-step-stuck{border-left-color:var(--red);background:color-mix(in srgb,var(--red) 8%,transparent)}
+.wb-step-stuck .wb-step-title{color:var(--ink)}
+.wb-step-stuck .wb-step-why{color:var(--red2);font-weight:700}
 @media (max-width:560px){.wb-step{flex-direction:column;align-items:flex-start}.wb-step-why{max-width:100%;text-align:left}}
 
 /* 并行 = 多个任务队列：一路一行横排卡，多路队列从上往下叠。

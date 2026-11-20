@@ -1043,6 +1043,12 @@
     batchMode: false,       // true = 走「看板分批→整批交给 Agent」新执行模型
     shelved: [],            // 搁置的卡 id（用户明确不想看到它出现在备选里），存本机
   };
+  // 同一张卡「跑完了但没改台账」最多重试几次。
+  //
+  // 为什么是 3：每次重试都要真花钱烧 Token，而「同一张卡 3 次都改不动台账」
+  // 基本已经不是网络抖动，而是**卡在某个要人判断的地方**了 —— 那时候该人来拍板，
+  // 不该继续自动重派。（autoloop 那边也是「连续第 3 次告诉你」。）
+  var WB_MAX_TRIES = 3;
   // 暴露给测试/扩展：只读探针，不会在正常页面干扰任何东西。
   try { window.__wb = WB; } catch (e) {}
   // 刷新候选池 / 重画池子的两个探针。平时没有任何代码读它们，只有测试用
@@ -1981,9 +1987,10 @@
         if (!WB.run) return;
         var okAsk = res.ok;
         var verdict = okAsk ? (res.text || "（无文字结论）") : (res.error || "处理未成功");
+        // 这一批的每张卡，问完之前的台账状态
+        var beforeStatus = {};
         batchCards.forEach(function (c) {
-          workbenchMark(stepEls[c.id], okAsk ? "done" : "wait", verdict.slice(0, 90));
-          c.active = false;
+          beforeStatus[c.id] = (D.items[c.id] && D.items[c.id].status) || "";
         });
         workbenchLog("路「" + lane.prefix + "」第 " + (Math.floor(cursor / perBatch) + 1) + " 批：" +
           (okAsk ? "窗口处理完成" : "处理失败——" + verdict.slice(0, 60)));
@@ -1991,15 +1998,45 @@
         (function releaseAll(k) {
           if (!WB.run) return;
           if (k >= rel.length) {
-            rel.forEach(function (c) {
-              c.done = true;
-              delete WB.inflight[c.id];
+            // 全部交还完，回读一次台账，逐张判「真做成了没」——
+            // 和逐张执行（settle）用同一套判据，不再无条件记 done。
+            getLedgerBoard(function (lr) {
+              if (!WB.run) return;
+              rel.forEach(function (c) {
+                // 同样按数组 find（/api/board 的 items 是数组），不能当对象索引。
+                var after = itemStatusFromBoard(lr, c.id);
+                var prev = beforeStatus[c.id] || "";
+                var moved = after !== prev;
+                var closed = moved && !isOpenWbStatus(after);
+                var tail = closed ? " · 已收口" : (moved ? " · 状态：'" + prev + "'→'" + after + "'" : " · 仍在 " + (after || prev) + "，未收口");
+                workbenchMark(stepEls[c.id], closed ? "done" : "wait", (verdict.slice(0, 80) + tail).slice(0, 140));
+                c.active = false;
+                if (closed) {
+                  c.done = true;
+                  c.stuck = false;
+                } else {
+                  // 没做成：留在队列里等这一路下一轮重派，连试 3 次才停。
+                  c.tries = (c.tries || 0) + 1;
+                  if (c.tries >= WB_MAX_TRIES) {
+                    c.done = true;
+                    c.stuck = true;
+                    workbenchMark(stepEls[c.id], "stuck", "试了 " + c.tries + " 次没做成，等你看看");
+                    workbenchLog("「" + c.id + "」连续 " + c.tries + " 次没把状态改掉，先停下等人看。");
+                  } else {
+                    c.done = false;
+                    workbenchLog("「" + c.id + "」这一批没把状态改掉（第 " + c.tries + "/" + WB_MAX_TRIES + " 次），稍后重派。");
+                  }
+                }
+                delete WB.inflight[c.id];
+              });
+              WB.doneCount = WB.order.filter(function (o) { return o.done; }).length;
+              updateWbProgress();
+              // 没做成的卡不推进游标 —— 否则这一路会跳过它们。
+              // 只有**全部收口**才把 cursor 往前推，否则原地再来一轮（直到 tries 到上限）。
+              var allClosed = rel.every(function (c) { return c.done; });
+              if (allClosed) WB.laneCursor[laneIndex] = cursor + batchCards.length;
+              setTimeout(function () { if (WB.run) workbenchLaneStep(laneIndex); }, 400);
             });
-            WB.doneCount = WB.order.filter(function (o) { return o.done; }).length;
-            updateWbProgress();
-            if (!WB.run) return;
-            WB.laneCursor[laneIndex] = cursor + batchCards.length;
-            setTimeout(function () { if (WB.run) workbenchLaneStep(laneIndex); }, 400);
             return;
           }
           releaseForWorkbench(rel[k].id, WB.by || flowActor(), function () { releaseAll(k + 1); });
@@ -2077,24 +2114,73 @@
             workbenchLog("「" + id + "」" + (okAsk ? "处理完成" : "处理未成功") + tail + "：" + verdict.slice(0, 60));
             if (okAsk && moved && !closed) workbenchLog("「" + id + "」推进到 " + afterStatus + "，同区域下一张应可接上。");
             if (okAsk && !moved && note) workbenchLog(note);
+            // 只有**真收口**才记「成了」；没动状态的算「跑完了但没做成」，
+            // 交给下面的重试分支处理（见 settle 里的 settledOk 判据）。
+            return closed;
           }
           getLedgerBoard(function (lr, lstatus) {
-            var afterStatus = (lr && lr.items && lr.items[id] && lr.items[id].status) || "";
-            finishVerdict(afterStatus, "");
-          });
-          var by = (res && res.by) || WB.by || flowActor();
-          releaseForWorkbench(id, by, function (releaseOk) {
-            next.o.done = true;
-            next.o.result = verdict;
-            next.o.active = false;
-            delete WB.inflight[id];
-            WB.doneCount += 1;
-            updateWbProgress();
-            if (!WB.run) return;
-            setTimeout(function () { if (WB.run) workbenchPump(); }, 400);
+            // ⚠️ `/api/board` 返回的是**ledger.json 原文**，它的 `items` 是**数组**。
+            // 以前这里写的是 `lr.items[id]`（当对象索引）—— 数组用字符串下标取永远是
+            // undefined，于是 `afterStatus` 恒为空、`moved` 恒为 false。
+            // 也就是说「回读台账看状态变没变」这一步**从来没生效过**。
+            // 现在按数组 find。
+            var afterStatus = itemStatusFromBoard(lr, id);
+            var settledOk = finishVerdict(afterStatus, "");
+            var by = (res && res.by) || WB.by || flowActor();
+            releaseForWorkbench(id, by, function (releaseOk) {
+              settle(next.o, stepEl, verdict, settledOk);
+              if (!WB.run) return;
+              setTimeout(function () { if (WB.run) workbenchPump(); }, 400);
+            });
           });
         }, wbConvKey(id), id);
       });
+    }
+
+    // 收尾一张卡。**区分「做成了」和「只是跑完了」**（2026-11-20）：
+    //
+    // 以前这里无条件 `next.o.done = true` —— 于是「Agent 回了一句话但没动台账」
+    // 和「真的把卡收口了」在界面上长得一模一样，一排「处理完成」里有几张是假的
+    // 得自己翻日志才知道。这正是 agent-autoloop 那句「Agent 没跑成 → 过几分钟重派，
+    // 每次翻倍，连续第 3 次才告诉你」要解决的问题。
+    //
+    // 现在的规矩：
+    //   · **真收口**（状态离开未收口集合）→ done，正常推进下一张；
+    //   · **没做成**（还在原状态）→ 不记 done，`badTries+1`，稍等重派；
+    //   · 连试 3 次还是不成 → 标红停下（`stuck`），日志写清楚，
+    //     不再无限烧 Token，也不再假装它成功了。
+    //
+    // 为什么上限是 3：模型每次重试都要花真钱，而「同一张卡 3 次都改不动台账」
+    // 基本已经不是抖动、而是卡在某个要人判断的地方了 —— 那时候该人来拍板。
+    function settle(o, stepEl, verdict, settledOk) {
+      o.active = false;
+      delete WB.inflight[o.id];
+      if (settledOk) {
+        o.done = true;
+        o.result = verdict;
+        o.stuck = false;
+        WB.doneCount = WB.order.filter(function (x) { return x.done; }).length;
+        updateWbProgress();
+        return;
+      }
+      o.tries = (o.tries || 0) + 1;
+      if (o.tries >= WB_MAX_TRIES) {
+        // 该停下来了：标红 + 说人话，别再自动派。
+        o.done = true;          // 从队列里摘出去，否则 pump 会一直挑到它
+        o.stuck = true;
+        o.result = verdict;
+        workbenchMark(stepEl, "stuck", "试了 " + o.tries + " 次没做成，等你看看");
+        workbenchLog("「" + o.id + "」连续 " + o.tries + " 次没把状态改掉，先停下 —— " +
+          "这次要人看一眼它卡在哪。结论：" + String(verdict).slice(0, 60));
+        WB.doneCount = WB.order.filter(function (x) { return x.done; }).length;
+        updateWbProgress();
+        return;
+      }
+      // 还没到上限：留在队列里等下一轮重派（done 保持 false，pump 会再挑到它）。
+      o.done = false;
+      workbenchMark(stepEl, "wait", "第 " + o.tries + " 次没做成，稍后重试");
+      workbenchLog("「" + o.id + "」这一轮没把状态改掉（第 " + o.tries + "/" + WB_MAX_TRIES + " 次），稍后重派。");
+      updateWbProgress();
     }
 
     // 每一轮把「现在可开工」的卡尽量放满 cap：
@@ -2140,6 +2226,21 @@
     getJson(wbUrl("api/board"), function (res, status) {
       done(res && res.items ? res : null, status);
     });
+  }
+
+  // 从 ledger.json 原文里取某张卡的状态。
+  //
+  // ⚠️ 专门写这个函数是因为踩过两次坑（2026-11-20）：
+  //   ① `/api/board` 的 `items` 是**数组**，用 `items[id]` 取永远是 undefined；
+  //   ② 而 `D.items`（board-data 里的）是**按 id 索引的对象**，且它是
+  //      `itemVars()` 生成的展示结构 —— 以前**没有 `status` 字段**（只有中文 `statusLabel`），
+  //      所以 `D.items[id].status` 也永远是 undefined。
+  // 两处一起导致「回读台账看状态变没变」从来没生效，`moved` 恒 false。
+  // 现在：这个函数只认数组（/api/board 的形状），D.items 那边靠 context.mjs 补上 status。
+  function itemStatusFromBoard(board, id) {
+    if (!board || !Array.isArray(board.items)) return "";
+    var hit = board.items.filter(function (x) { return x && x.id === id; })[0];
+    return (hit && hit.status) || "";
   }
 
   function claimForWorkbench(id, done) {
@@ -2319,7 +2420,7 @@
   function workbenchMark(stepEl, cls, note) {
     if (!stepEl) return;
     // 也清掉「排队中」：这张卡一旦真的轮到它跑，虚线边和「等 XXX」就不再成立。
-    stepEl.classList.remove("wb-step-pending", "wb-step-running", "wb-step-asking", "wb-step-done", "wb-step-skip", "wb-step-wait", "wb-step-queued");
+    stepEl.classList.remove("wb-step-pending", "wb-step-running", "wb-step-asking", "wb-step-done", "wb-step-skip", "wb-step-wait", "wb-step-queued", "wb-step-stuck");
     if (stepEl.getAttribute("data-wb-queued")) stepEl.removeAttribute("data-wb-queued");
     stepEl.classList.add("wb-step-" + cls);
     if (note) {

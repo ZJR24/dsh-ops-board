@@ -41,6 +41,14 @@ export function itemVars(config, ledger, item) {
     id: item.id,
     title: item.title,
     laneLabel: lane.label,
+    // ⚠️ 两个都要：`status` 是**原始状态码**（open/doing/fixed…），前端拿它判断
+    // 「这张卡到底动没动」；`statusLabel` 是中文显示名（待处理/已修复…）。
+    //
+    // 2026-11-20 修的真 bug：以前这里**只有 statusLabel**，于是
+    // client.js 的 `D.items[id].status` 恒为 undefined →
+    // `workbenchPump` 里「回读台账看状态变没变」那一步**从来没生效过**：
+    // prev 永远空、moved 永远 false，结果是「跑完了」一律被当成「做成了」。
+    status: item.status,
     statusLabel: (lane.statusLabels && lane.statusLabels[item.status]) || item.status,
     severityText: sev ? `（严重度：${sev.label}）` : "",
     area: item.area || "未标注",
