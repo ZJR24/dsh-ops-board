@@ -456,6 +456,17 @@ tbody tr:hover{background:var(--surface)}
 .wb-standby{border-style:dashed;border-color:var(--rule2);background:var(--surface-soft)}
 .wb-standby .wb-pick-title{color:var(--muted)}
 .wb-pool-foot{display:flex;align-items:center;gap:8px;padding:6px 8px;font-size:11px;color:var(--muted);font-family:var(--sans)}
+/* ── 搁置（2026-11-20 用户定）────────────────────────────────────
+   「有的任务，我是不想他出现在备选的」→ 备选卡上多一个「搁置」按钮，
+   收进单独一行「搁置」；搁置里的卡点「备选」回到备选队列。
+   搁置是**用户的意愿**（存 localStorage），不是台账状态 —— 所以样式上要
+   比备选更"退后"：更淡、更小、不加可拖手势。 */
+.wb-pick-shelf,.wb-pick-unshelf{flex:none;border:1px solid var(--rule2);background:var(--surface);color:var(--muted);cursor:pointer;font-family:var(--sans);font-size:9.5px;line-height:1;padding:2px 6px;border-radius:3px}
+.wb-pick-shelf:hover,.wb-pick-unshelf:hover{color:var(--ink);border-color:var(--ink);background:var(--surface-hover)}
+.wb-pick-shelf:focus-visible,.wb-pick-unshelf:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+.wb-pick.wb-shelved{border-style:dotted;border-color:var(--rule);background:transparent;opacity:.72}
+.wb-pick.wb-shelved .wb-pick-title{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--rule2)}
+.wb-group-shelf .wb-group-label{color:var(--muted)}
 .workbench-mode{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--sans);font-size:11.5px}
 .wb-mode-option{display:inline-flex;align-items:center;gap:4px;color:var(--ink);cursor:pointer}
 .wb-mode-option input{accent-color:var(--blue)}

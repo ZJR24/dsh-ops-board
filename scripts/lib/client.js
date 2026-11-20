@@ -1008,6 +1008,7 @@
     execOrder: [],          // 按 claim 成功先后记的执行顺序（留给报告/调试）
     batchSize: 1,           // 分批粒度：每批几张卡（默认串行=每批 1 张）
     batchMode: false,       // true = 走「看板分批→整批交给 Agent」新执行模型
+    shelved: [],            // 搁置的卡 id（用户明确不想看到它出现在备选里），存本机
   };
   // 暴露给测试/扩展：只读探针，不会在正常页面干扰任何东西。
   try { window.__wb = WB; } catch (e) {}
@@ -1016,6 +1017,79 @@
   try { window.__wbRefresh = workbenchRefresh; window.__wbRenderPool = renderWorkbenchPool; } catch (e) {}
 
   function wbPresent() { return !!WB.el; }
+
+  // ──────────────── 搁置队列（用户不想在备选里看到的卡） ────────────────
+  //
+  // 2026-11-20 用户原话：「有的任务，我是不想他出现在备选的，所以，我觉得有必要在卡片上
+  // 增加一个按钮（搁置），可以让这个卡片不在备选显示，增加一行搁置队列。搁置队列中的
+  // 卡片显示备选按钮，点击备选后，回到备选队列。」
+  //
+  // 三个要点：
+  //   ① 搁置是**用户的意愿**，不是台账状态 —— 所以存 localStorage，不写 ledger.json。
+  //      台账里那些卡的 status 一点没变，机器仍然认为它们可开工；变的只是「我不看它」。
+  //   ② 搁置的卡**不进队列、不进备选**，只出现在「搁置」那一行。
+  //   ③ 搁置里的卡点「备选」就回来 —— 回到备选，不是直接进执行队列
+  //      （用户说的是「回到备选队列」，那就得是备选）。
+  //
+  // 为什么要按板分开存：同一个浏览器里可能开着好几块看板，A 板的搁置不该影响 B 板。
+  var SHELF_KEY_BASE = "ops-board-wb-shelved";
+
+  // 搁置清单按**看板**分开存：同一个浏览器里可能开着好几块板，A 板的搁置不该影响 B 板。
+  //
+  // 取哪个标识：优先 Harness 注入的 board.id（在面板里就是这个）；
+  // 没有的时候（直接用 serve.mjs 打开、或 file:// 打开）退回 D.project（台账里的项目名）。
+  // ⚠️ 不要用 harnessEnv().dir —— 那在裸页里是 null，会让所有板共用一个键。
+  function shelfKey() {
+    var env = harnessEnv();
+    var id = (env && env.id) || D.project || "board";
+    return SHELF_KEY_BASE + ":" + id;
+  }
+
+  function loadShelf() {
+    try {
+      var raw = localStorage.getItem(shelfKey());
+      var arr = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(arr)) return [];
+      return arr.filter(function (x) { return typeof x === "string" && x; });
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function saveShelf() {
+    try {
+      localStorage.setItem(shelfKey(), JSON.stringify(WB.shelved || []));
+    } catch (e) {}
+  }
+
+  // 搁置 / 取消搁置。搁置时顺手把它从执行队列里摘出来 ——
+  // 「搁置」的语义就是「现在别管它」，留着它在队列里等会儿还会被执行，自相矛盾。
+  function wbSetShelved(id, on) {
+    if (!id) return;
+    var list = (WB.shelved || []).slice();
+    var i = list.indexOf(id);
+    if (on && i === -1) list.push(id);
+    if (!on && i > -1) list.splice(i, 1);
+    WB.shelved = list;
+    saveShelf();
+    if (on) {
+      var q = WB.dragPool.indexOf(id);
+      if (q > -1) WB.dragPool.splice(q, 1);
+    }
+    var pool = WB.el && WB.el.querySelector("[data-wb-pool]");
+    if (pool) renderWorkbenchPool(pool);
+    workbenchRefreshModeBtn();
+    workbenchLog(on ? "已搁置「" + id + "」——它不会出现在备选里了，在「搁置」那一行可以取回。"
+                    : "「" + id + "」已放回备选队列。");
+  }
+
+  // 这张卡现在归哪一组？running 优先（在跑的就是在跑），再判搁置，最后备选。
+  function wbWhere(c) {
+    if (c.state === "running") return "queue";
+    if ((WB.shelved || []).indexOf(c.id) > -1) return "shelf";
+    if (WB.dragPool.indexOf(c.id) > -1) return "queue";
+    return "standby";
+  }
 
   // 用 plan 铺候选池。ready=可开工，running=已被领走（只读显示），
   // waiting=排队（规划用；执行时等到它可领才真跑）。
@@ -1054,8 +1128,10 @@
         // 于是别人一领走（或上一轮还在跑），这张卡就被踢出队列、掉回备选区，
         // 界面上表现为「正在处理的任务不在处理队列里，还在备选里」。
         var kept = known.filter(function (id) { return cand.some(function (c) { return c.id === id; }); });
-        cand.filter(function (c) { return kept.indexOf(c.id) === -1; })
-          .forEach(function (c) { kept.push(c.id); });
+        // 搁置的卡不自动进队列 —— 用户搁置它就是不想让它参与排队。
+        cand.filter(function (c) {
+          return kept.indexOf(c.id) === -1 && (WB.shelved || []).indexOf(c.id) === -1;
+        }).forEach(function (c) { kept.push(c.id); });
         WB.dragPool = kept;
       }
       WB.candidate = cand;
@@ -1106,6 +1182,9 @@
     var queued = WB.dragPool.map(function (id) {
       var c = byId[id];
       if (!c) return "";
+      // 搁置的卡不该出现在队列里（wbSetShelved 已经把它摘了，这里再兜一次，
+      // 免得别处直接改 dragPool 时把它们带进来）。
+      if ((WB.shelved || []).indexOf(c.id) > -1 && c.state !== "running") return "";
       var label = esc(c.title);
       if (c.state === "wait") label += ' <span class="wb-queued">· 等 ' + esc(c.waitsFor) + "</span>";
       else if (c.state === "running") label += ' <span class="wb-occupied">· ' + esc(c.by) + " 正在做</span>";
@@ -1133,26 +1212,45 @@
         "</div>"
       );
     }).join("");
-    // 备选 = 没进队列、且**没在处理中**的卡（可点加入）。
+    // 备选 = 没进队列、**没在处理中**、也**没被搁置**的卡（可点加入）。
     // 以前这里写成 `c.state === "running" || 不在队列`，于是正在处理的卡被硬塞进备选区，
     // 界面上就成了「正在处理的任务不在处理队列里，还在备选里」。
     var standby = WB.candidate.filter(function (c) {
-      return c.state !== "running" && WB.dragPool.indexOf(c.id) === -1;
+      return wbWhere(c) === "standby";
     }).map(function (c) {
       return (
         '<div class="wb-pick wb-standby" data-wb-id="' + esc(c.id) + '" data-wb-add="' + esc(c.id) + '" title="点一下加入队列">' +
         '<span class="wb-pick-row"><span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
         '<span class="wb-pick-title">' + esc(c.title) + "</span>" +
         '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+        // 每张备选卡都能搁置：搁置 = 「以后别在备选里给我看了」。
+        '<button type="button" class="wb-pick-shelf" data-wb-shelf="' + esc(c.id) + '" title="搁置：不要出现在备选里">搁置</button>' +
         '<span class="wb-queued">备选</span></span>' +
+        "</div>"
+      );
+    }).join("");
+    // 搁置队列：用户明确不想在备选里看到的卡。点「备选」回到备选（不是直接进执行队列）。
+    var shelved = (WB.shelved || []).map(function (id) {
+      var c = byId[id];
+      if (!c) return "";
+      // 正在跑的卡不显示在搁置里 —— 机器还在用它，摆在「搁置」会让人以为它没在跑。
+      if (c.state === "running") return "";
+      return (
+        '<div class="wb-pick wb-shelved" data-wb-id="' + esc(c.id) + '" title="已搁置：不会出现在备选里">' +
+        '<span class="wb-pick-row"><span class="wb-pick-id">' + esc(c.id) + "</span></span>" +
+        '<span class="wb-pick-title">' + esc(c.title) + "</span>" +
+        '<span class="wb-pick-foot"><span class="wb-pick-prefix">' + esc(c.prefix) + "</span>" +
+        '<button type="button" class="wb-pick-unshelf" data-wb-unshelf="' + esc(c.id) + '" title="放回备选队列">备选</button>' +
+        "</span>" +
         "</div>"
       );
     }).join("");
     var group = '<div class="wb-group"><span class="wb-group-label">待执行队列（点卡片撤回备选 / 拖动排序）</span>' +
       (queued || '<span class="workbench-empty">尚未排卡，点下方备选卡加入</span>') + "</div>";
-    if (standby) group += '<div class="wb-group"><span class="wb-group-label">备选（点卡片加入队列）</span>' + standby +
+    if (standby) group += '<div class="wb-group"><span class="wb-group-label">备选（点卡片加入队列 / 点「搁置」收起）</span>' + standby +
       '<span class="wb-pool-foot"><span>全部未排队</span>' +
       '<button type="button" class="btn" data-wb-addall>全部加入</button></span></div>';
+    if (shelved) group += '<div class="wb-group wb-group-shelf"><span class="wb-group-label">搁置（点「备选」放回备选队列）</span>' + shelved + "</div>";
     pool.innerHTML = group;
     // 拖动排序 + 移出
     bindWbDrag(pool);
@@ -1185,15 +1283,34 @@
     });
     // 备选卡点一下加入队列
     Array.prototype.forEach.call(pool.querySelectorAll("[data-wb-add]"), function (add) {
-      add.addEventListener("click", function () {
+      add.addEventListener("click", function (e) {
+        // 点「搁置」按钮不是「加入队列」——两个动作在同一张卡上，别让它冒泡到卡片。
+        if (e.target && e.target.closest("[data-wb-shelf]")) return;
         var id = add.getAttribute("data-wb-add");
         if (WB.dragPool.indexOf(id) === -1) WB.dragPool.push(id);
         renderWorkbenchPool(pool);
         workbenchRefreshModeBtn();
       });
     });
+    // 备选卡上的「搁置」：从备选里收起来，进「搁置」那一行。
+    Array.prototype.forEach.call(pool.querySelectorAll("[data-wb-shelf]"), function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        wbSetShelved(btn.getAttribute("data-wb-shelf"), true);
+      });
+    });
+    // 搁置卡上的「备选」：放回备选队列。
+    Array.prototype.forEach.call(pool.querySelectorAll("[data-wb-unshelf]"), function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        wbSetShelved(btn.getAttribute("data-wb-unshelf"), false);
+      });
+    });
     // 全部加入：把备选里所有卡一次收进队列。
-    // 正在处理中的卡本来就该在队列里（refresh 会保住），这里不能把它们再过滤掉。
+    // 正在处理中的卡本来就该在队列里（refresh 会保住），这里不能把它们再过滤掉；
+    // 搁置的卡**绝不带进来** —— 用户搁置它就是不想让它参与排队。
     var addAll = pool.querySelector("[data-wb-addall]");
     if (addAll) {
       addAll.addEventListener("click", function () {
@@ -1202,7 +1319,11 @@
           .map(function (c) { return c.id; });
         WB.dragPool = kept.concat(
           WB.candidate
-            .filter(function (c) { return c.state !== "running" && kept.indexOf(c.id) === -1; })
+            .filter(function (c) {
+              return c.state !== "running" &&
+                kept.indexOf(c.id) === -1 &&
+                (WB.shelved || []).indexOf(c.id) === -1;
+            })
             .map(function (c) { return c.id; })
         );
         renderWorkbenchPool(pool);
@@ -2209,6 +2330,9 @@
 
   // 初始化：铺一次候选池；radio 切换刷新按钮态。
   if (wbPresent()) {
+    // 搁置清单要在第一次铺池**之前**读回来，否则刷新时会先按「全部在备选」画一帧，
+    // 再跳成搁置态 —— 视觉上闪一下，且那一帧里搁置的卡是能被拖走的。
+    WB.shelved = loadShelf();
     workbenchRefresh();
     var wbModes = WB.el.querySelectorAll("input[name=wb-mode]");
     Array.prototype.forEach.call(wbModes, function (r) {
