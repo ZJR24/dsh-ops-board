@@ -41,6 +41,12 @@ export function itemVars(config, ledger, item) {
     id: item.id,
     title: item.title,
     laneLabel: lane.label,
+    // `lane` 是配置里的**键**（bug / feature / risk），不随显示名变。
+    //
+    // 2026-11-21 补：用户把「风险」页改名成「风险观察」后暴露了一个坑 ——
+    // client.js 的 `riskItems()` 原来按 `laneLabel === "风险"` 找车道，
+    // 改名即失效（静默变成「共 0 条」，不报错）。判车道永远该用 key，不该用显示名。
+    lane: item.lane,
     // ⚠️ 两个都要：`status` 是**原始状态码**（open/doing/fixed…），前端拿它判断
     // 「这张卡到底动没动」；`statusLabel` 是中文显示名（待处理/已修复…）。
     //

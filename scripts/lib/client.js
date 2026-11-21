@@ -2971,7 +2971,17 @@
     for (var id in items) {
       if (!Object.prototype.hasOwnProperty.call(items, id)) continue;
       var it = items[id];
-      if (!it || it.laneLabel !== "风险") continue;
+      // ⚠️ 用 **lane 键**判断，不用 `laneLabel`（2026-11-21 改名后暴露的坑）。
+      //
+      // 原来写的是 `it.laneLabel !== "风险"` —— 那是**显示名**。
+      // 用户把这一页改名成「风险观察」之后，这个判断立刻失效：
+      // 一条都选不出来，于是「风险审核」功能静默变成空范围
+      // （它不会报错，只会说「共 0 条」）。
+      //
+      // `lane` 是配置里的 key（`risk`），不随显示名变，这才是正确的判据。
+      // 实测确认 board-data 里每条都带 `lane`（66/66），所以**不需要按显示名兜底** ——
+      // 留兜底反而是隐患：下次改名时那段又会静默失配。
+      if (it.lane !== "risk") continue;
       if (isClosedStatus(it.statusLabel)) continue;
       out.push(it);
     }

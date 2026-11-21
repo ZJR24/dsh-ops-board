@@ -32,7 +32,7 @@
     },
     {
       "key": "lane:risk",
-      "label": "风险",
+      "label": "风险观察",
       "kind": "lane",
       "lane": "risk"
     },
@@ -184,7 +184,7 @@
     },
     {
       "key": "risk",
-      "label": "风险",
+      "label": "风险观察",
       "prefix": "RISK",
       "countNoun": "风险",
       "openNoun": "未解除",
