@@ -545,6 +545,32 @@ tbody tr:hover{background:var(--surface)}
 .workbench-rehearsal:has(input[data-wb-rehearsal]:checked){border-color:var(--red);background:var(--surface-hover)}
 .workbench-rehearsal:has(input[data-wb-rehearsal]:checked) label{color:var(--red2);font-weight:700}
 .wb-rehearsal-hint{color:var(--muted);font-size:10.5px;line-height:1.5;flex:1 1 320px}
+/* 文件级调派开关（中控化步骤 6）。默认关，勾上才走「先报意图再动手」。 */
+.workbench-filedispatch{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;font-family:var(--sans);font-size:11.5px;padding:5px 8px;border:1px dashed var(--rule2);border-radius:3px}
+.workbench-filedispatch:has(input[data-wb-file-dispatch]:checked){border-color:var(--blue);background:var(--surface-hover)}
+.workbench-filedispatch:has(input[data-wb-file-dispatch]:checked) label{color:var(--blue);font-weight:700}
+.wb-filedispatch-hint{color:var(--muted);font-size:10.5px;line-height:1.5;flex:1 1 320px}
+
+/* 文件占用面板（中控化步骤 6）。为什么要显示：文件锁是「两张**不同**的卡改了
+   同一个文件」才触发的，而这件事在界面上本来完全不可见 —— 用户只看到一张卡
+   「排队中」，然后纳闷「它和前面那张明明没关系」。 */
+.workbench-locks{margin-top:10px;border:1px solid var(--rule2);border-radius:4px;padding:8px 10px;font-family:var(--sans)}
+.wb-locks-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.wb-locks-title{font-weight:700;font-size:11.5px;color:var(--ink)}
+.wb-locks-meta{color:var(--muted);font-size:10.5px;flex:1 1 auto}
+.wb-locks-refresh{font-size:9px !important;padding:1px 6px !important}
+.wb-locks-body{margin-top:6px;display:flex;flex-direction:column;gap:4px}
+.wb-lock-row{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:10.5px;padding:3px 0;border-top:1px dotted var(--rule2)}
+.wb-lock-row:first-child{border-top:0}
+.wb-lock-owner{font-weight:700;color:var(--blue);flex:none;font-size:10px}
+.wb-lock-main{display:flex;gap:5px;flex-wrap:wrap;flex:1 1 260px;min-width:0}
+.wb-lock-file{display:inline-block;font-size:9px;padding:1px 5px;border:1px solid var(--rule2);border-radius:3px;color:var(--ink);background:var(--surface);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wb-lock-closure{font-size:9px;color:var(--muted)}
+.wb-lock-cards{font-size:9.5px;color:var(--muted);flex:none}
+.wb-lock-cards.is-none{color:var(--amber);font-style:italic}
+.wb-lock-ttl{font-size:9.5px;color:var(--muted);flex:none;font-variant-numeric:tabular-nums}
+.wb-lock-reclaim{font-size:9px;line-height:1;padding:2px 5px;border:1px solid color-mix(in srgb,var(--red) 36%,transparent);border-radius:3px;background:none;color:var(--red2);cursor:pointer;font-family:var(--sans)}
+.wb-lock-reclaim:hover{background:color-mix(in srgb,var(--red) 8%,transparent)}
 /* 分析窗口出来的计划：可读地列出它怎么分的，以及是「AI 分的」还是「回退的」 */
 .wb-plan-note{font-family:var(--sans);font-size:11px;color:var(--muted);line-height:1.6;margin:0 0 8px;padding:6px 8px;border-left:2px solid var(--rule2);background:var(--surface-soft)}
 .wb-plan-note b{color:var(--ink);font-weight:600}

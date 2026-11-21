@@ -855,6 +855,14 @@ function workbenchBlock() {
       <label class="wb-mode-option"><input type="checkbox" data-wb-rehearsal> 演练模式（对话窗口只回话，不动台账）</label>
       <span class="wb-rehearsal-hint">勾上之后，交活的话术换成「只回应、别改 ledger.json」。claim / 派活 / 等回答 / 交还整条链路照跑，只是卡不会被真收口 —— 想反复看窗口的接活表现、又不愿意把数据跑废时用。默认关。</span>
     </div>
+    <!--
+      文件级调派（中控化步骤 6，2026-11-21）。默认关，理由见 client.js 的 wbFileDispatch()：
+      它给每张卡多一个来回，且要求 agent 遵守意图格式，先能试再谈默认。
+    -->
+    <div class="workbench-filedispatch" data-wb-filedispatch-box>
+      <label class="wb-mode-option"><input type="checkbox" data-wb-file-dispatch> 文件级调派（先报要改哪些文件，判完冲突再动手）</label>
+      <span class="wb-filedispatch-hint">勾上之后，每张卡多一步：先把「我要改哪些文件、要新加哪些依赖」报上来，看板按依赖图算出波及面、和正在跑的任务比对，没冲突才放行。挡的是「两张不同的卡改了同一个文件」—— 那种情况卡级互斥看不出来。多花一个来回，默认关。</span>
+    </div>
     <div class="workbench-actions">
       <button type="button" class="btn" data-wb-analyze>分析</button>
       <button type="button" class="btn" data-wb-start disabled>开始执行</button>
@@ -868,6 +876,27 @@ function workbenchBlock() {
       <span class="wb-run-progress" data-wb-progress></span>
     </div>
     <ol class="workbench-steps" data-wb-steps></ol>
+  </div>
+  <!--
+    文件占用面板（中控化步骤 6，2026-11-21）。
+
+    为什么要把这个显示出来：文件锁是「两张不同的卡改了同一个文件」才触发的，
+    而那件事在界面上**完全不可见** —— 用户只会看到一张卡「排队中」，然后纳闷
+    「为什么这张卡不能开工？它和前面那张明明没关系」。
+
+    面板要回答三件事：
+      ① 现在有哪些文件被占着、被谁占、还有多久到期
+      ② 每把锁对应哪几张**卡**（把文件锁翻译成用户认得的编号）
+      ③ 为什么某张卡被挡住（冲突的文件名）
+    没有 ③ 的话，这个面板就只是又一个看不懂的调试信息。
+  -->
+  <div class="workbench-locks" data-wb-locks hidden>
+    <div class="wb-locks-head">
+      <span class="wb-locks-title">文件占用</span>
+      <span class="wb-locks-meta" data-wb-locks-meta></span>
+      <button type="button" class="btn btn-ask wb-locks-refresh" data-wb-locks-refresh title="重新读一次锁表">刷新</button>
+    </div>
+    <div class="wb-locks-body" data-wb-locks-body></div>
   </div>
   </div>
 </div>`;

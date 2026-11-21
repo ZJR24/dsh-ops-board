@@ -34,6 +34,11 @@ import { evidenceFreshness } from "./lib/evidence.mjs";
 import { lookAtFile, lookAtCommit } from "./lib/code-look.mjs";
 import { buildFlow } from "./lib/flow.mjs";
 import { planWorkbench, planBatches } from "./lib/workbench.mjs";
+// 中控化（2026-11-21）：文件锁 + 依赖图 + 调派判定
+import { createLockTable } from "./lib/locks.mjs";
+import { buildGraph } from "./lib/graph.mjs";
+import { requestDispatch, describeDispatch } from "./lib/dispatch.mjs";
+import { extractIntent } from "./lib/intent.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_ROOT = resolve(HERE, "..");
@@ -281,6 +286,72 @@ function persistClaims() {
 }
 
 const flowClaims = loadClaims(); // id -> { by, at, prefix }
+
+// ── 文件锁表（中控化步骤 4/6，2026-11-21）────────────────────────
+//
+// 和 `flowClaims` 的分工要说清楚，别混：
+//
+//   flowClaims  = 「这张**卡**被谁领走了」 —— 业务层互斥，按卡 id + 区域前缀
+//   fileLocks   = 「这些**文件**被谁占着」 —— 物理层互斥，按文件 + 依赖闭包
+//
+// 两层都需要：卡级互斥挡的是「同一张卡被两个人做」，
+// 文件级互斥挡的是「两张不同的卡改了同一个文件」—— 后者是 `flowClaims` 看不见的。
+//
+// 锁表默认落在看板目录，`--locks <文件>` 可覆盖（测试指向临时文件）。
+const locksPath = resolve(argValue("locks") || join(ROOT, "file-locks.json"));
+const fileLocks = createLockTable({ locksPath });
+const locksLoaded = fileLocks.load();
+
+// 依赖图缓存。**不是**「常驻 watcher」（架构文档 §三决策 3 明确不做），
+// 只是「同一次 serve 进程里、同一块板，30 秒内复用」——
+// 避免一次调派里被问好几遍都要重建。
+// 超过 30 秒就重建，所以图不会长期滞后。
+const GRAPH_TTL_MS = 30 * 1000;
+const graphCache = new Map();   // board key -> { at, graph }
+let graphSeq = 0;               // 记录重建次数，便于测试断言「真的复用了」
+
+/** 取图（带 30 秒缓存）。 */
+async function getGraph({ force }) {
+  const boardKey = ROOT;
+  const hit = graphCache.get(boardKey);
+  if (!force && hit && Date.now() - hit.at < GRAPH_TTL_MS) return hit.graph;
+  const target = targetProjectDir();
+  if (!target) return { ok: false, error: "这块板没配 projectDir，不知道该给哪个项目建图" };
+  const outFile = resolve(argValue("graph") || join(ROOT, ".graph-cache.json"));
+  const g = await buildGraph({
+    cwd: resolve(import.meta.dirname, ".."),
+    target,
+    sourceDirs: sourceDirsOf(target),
+    outFile,
+  });
+  graphSeq++;
+  if (g.ok) graphCache.set(boardKey, { at: Date.now(), graph: g });
+  return g;
+}
+
+/** 读 project.json 拿被管控项目目录。 */
+function targetProjectDir() {
+  try {
+    return JSON.parse(readFileSync(join(ROOT, "project.json"), "utf8")).projectDir || "";
+  } catch { return ""; }
+}
+
+/**
+ * 源码目录白名单（`--include-only` 用，见架构文档 §十F）。
+ *
+ * ⚠️ 为什么不是「扫全项目再排除」：实测 `--exclude` 完全不能省时间
+ * （83 s → 78 s），必须用白名单才能降到 1.8 s。
+ * 白名单固定这几项 + 项目里实际存在的一级目录（自动探测），
+ * 避免换项目就漏扫。
+ */
+function sourceDirsOf(target) {
+  const fixed = ["app.js", "app.json", "config.js", "utils", "pages", "components",
+    "custom-tab-bar", "cloudfunctions", "scripts", "sim", "pkg"];
+  const out = fixed.filter((d) => existsSync(join(target, d)));
+  // 兜底：如果白名单一个都不存在（不是小程序项目），退化为扫根
+  return out.length ? out : ["."];
+}
+
 
 // 推导只有一个来源：flow.mjs。这里不再另写一套排序 ——
 // 曾经这里按 id 字母序挑「同区域第一个」，而 flow.mjs 按阶段步序挑，
@@ -598,6 +669,108 @@ const server = createServer(async (req, res) => {
         holders: flowClaims.size,
         nextInSameArea: nextSame ? nextSame.id : null,
       });
+    }
+
+    // ── 文件锁与调派（中控化，2026-11-21）────────────────────────
+    //
+    //   GET  /api/locks          当前占着哪些文件
+    //   GET  /api/graph          依赖图概况（模块/边/耗时/是否新鲜）
+    //   POST /api/dispatch       报意图 → 判冲突 → 放行/排队
+    //   POST /api/dispatch/release  交还
+    //
+    // 为什么 GET /api/locks 要能把「为什么冲突」也带出来：
+    // 用户看到「排队中」时第一个问题就是「跟谁撞了、撞在哪个文件上」。
+    // 只回一个布尔值等于让人自己猜（那正是 `flowClaims` 那套的短板）。
+
+    if (path === "/api/locks" && req.method === "GET") {
+      const list = fileLocks.list();
+      // 顺带把「每条锁对应哪张卡」标出来（按 files 反查台账里的卡）
+      let items = [];
+      try {
+        const led = JSON.parse(readFileSync(LEDGER, "utf8"));
+        items = (led.items || []).filter((i) => Array.isArray(i.files) && i.files.length);
+      } catch {}
+      // 把文件锁翻译成**卡片编号** —— 用户认的是 OPS-903，不是 utils/a.js。
+      //
+      // 匹配规则要宽一点：锁里的 `files` 已经被 R1 扩张过（一个 .js 会带出
+      // .json/.wxml/.wxss 兄弟），而卡片 `files` 里通常只写真正要改的那一个。
+      // 所以**用「去掉扩展名的主干」比对**，否则永远对不上。
+      const stemOf = (p) => String(p || "").replace(/\.[^./]+$/, "").split("\\").join("/");
+      const enriched = list.map((l) => {
+        const lockStems = new Set((l.files || []).map(stemOf));
+        const cards = items
+          .filter((i) => (i.files || []).some((f) => lockStems.has(stemOf(f))))
+          .map((i) => i.id);
+        return { ...l, cards };
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        count: enriched.length,
+        loadedAtStart: locksLoaded,
+        locks: enriched,
+      });
+    }
+
+    if (path === "/api/graph" && req.method === "GET") {
+      const force = /[?&]force=1/.test(req.url || "");
+      const g = await getGraph({ force });
+      if (!g.ok) return sendJson(res, 200, { ok: false, error: g.error });
+      const cached = graphCache.get(ROOT);
+      const ageMs = cached ? Date.now() - cached.at : 0;
+      return sendJson(res, 200, {
+        ok: true,
+        modules: g.modules.length,
+        edges: g.edges.length,
+        unresolved: g.unresolved || 0,
+        buildMs: g.ms,
+        // 「图是不是新鲜」要显式给出来：30 秒缓存意味着**可能滞后**，
+        // 界面得能说明这一点，不能让用户以为永远是实时图。
+        ageMs,
+        stale: ageMs > GRAPH_TTL_MS,
+        rebuilds: graphSeq,
+      });
+    }
+
+    if (path === "/api/dispatch" && req.method === "POST") {
+      const body = await readJson(req);
+      const owner = String(body.owner || body.by || "").trim();
+      if (!owner) return sendJson(res, 400, { ok: false, error: "缺 owner（谁在申请）" });
+      // 允许直接给意图对象，也允许给一坨文本让中控自己解析（agent 的原话）
+      const intent = body.intent && typeof body.intent === "object"
+        ? { ok: true, files: body.intent.files || [], addsEdges: body.intent.addsEdges || [], raw: "", error: "" }
+        : extractIntent(body.text || "");
+      const r = await requestDispatch({
+        locks: fileLocks,
+        intent,
+        owner,
+        task: String(body.task || ""),
+        grapher: () => getGraph({ force: !!body.forceGraph }),
+        ttlSec: Number(body.ttlSec) > 0 ? Number(body.ttlSec) : undefined,
+      });
+      const code = r.decision === "go" ? 200 : r.decision === "queue" ? 409 : 400;
+      return sendJson(res, code, { ...r, summary: describeDispatch(r) });
+    }
+
+    if (path === "/api/dispatch/release" && req.method === "POST") {
+      const body = await readJson(req);
+      const lockId = String(body.lockId || "").trim();
+      const owner = String(body.owner || body.by || "").trim();
+      const r = await fileLocks.release(lockId, owner);
+      return sendJson(res, r.ok ? 200 : 409, r);
+    }
+
+    if (path === "/api/dispatch/renew" && req.method === "POST") {
+      const body = await readJson(req);
+      const r = await fileLocks.renew(String(body.lockId || ""), String(body.owner || ""), Number(body.ttlSec) || 0);
+      return sendJson(res, r.ok ? 200 : 409, r);
+    }
+
+    if (path === "/api/dispatch/reclaim" && req.method === "POST") {
+      // 手动回收：agent 进程崩了没人来释放，人点一下清掉。
+      // 为什么必须有这个：TTL 到期前同区域会被一直挡着，而「确认它死了」只有人能做。
+      const body = await readJson(req);
+      const r = await fileLocks.forceRelease(String(body.lockId || ""), String(body.why || "手动回收"));
+      return sendJson(res, r.ok ? 200 : 404, r);
     }
 
     // 工作台：分析选中条目，给出串行 / 并行两种编排建议。

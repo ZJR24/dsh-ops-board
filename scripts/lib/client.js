@@ -958,6 +958,8 @@
     if (wbStop) { e.preventDefault(); workbenchStop(); return; }
     var wbClear = e.target.closest("[data-wb-clear]");
     if (wbClear) { e.preventDefault(); workbenchClear(); return; }
+    var wbLocksRefresh = e.target.closest("[data-wb-locks-refresh]");
+    if (wbLocksRefresh) { e.preventDefault(); workbenchRefreshLocks(); return; }
     // 工作流页已于 2026-11-18 删除，[data-flow-release]/[data-flow-claim] 不再存在于任何页面，
     // 原来的这两个分支与 claimFlowItem / releaseFlowItem 已一并清除（2026-11-18 画布清理）。
     // 领取语义仍然活着，但在工作台侧：claimForWorkbench / releaseForWorkbench 直接打
@@ -2385,6 +2387,38 @@
     });
   }
 
+  // ── 文件级调派（中控化，2026-11-21，默认关闭）──────────────────
+  //
+  // 为什么默认关闭：它会给每张卡**多一个来回**（先报意图、判冲突，才允许动手），
+  // 而且要求 agent 遵守意图格式。这两件事都还没在真实使用中验证过，
+  // 直接默认打开会打断现有的工作流。所以做成开关（`WB.fileDispatch`），
+  // 勾上才走这条路 —— 和「演练模式」同一个策略：新机制先能试，再决定要不要默认。
+  //
+  // 走这条路时，每张卡的流程变成：
+  //   claim（卡级）→ 报意图 → 判冲突（文件级）→ 放行 → 干活 → 交还
+  // 卡级互斥挡「同一张卡被两个人做」，文件级互斥挡「两张不同的卡改了同一文件」。
+  function wbFileDispatch() {
+    var cb = WB.el && WB.el.querySelector("[data-wb-file-dispatch]");
+    return !!(cb && cb.checked);
+  }
+
+  function dispatchRequest(intent, task, done) {
+    postJson(wbUrl("api/dispatch"), {
+      owner: flowActor(),
+      task: task || "",
+      intent: intent,
+    }, function (res, status) {
+      done(res || {}, status);
+    });
+  }
+
+  function dispatchRelease(lockId, done) {
+    if (!lockId) { if (done) done(); return; }
+    postJson(wbUrl("api/dispatch/release"), { lockId: lockId, owner: flowActor() }, function () {
+      if (done) done();
+    });
+  }
+
   function releaseForWorkbench(id, by, done) {
     postJson(flowUrl("release"), { id: id, by: by }, function (res, status) {
       done && done(status === 200);
@@ -2580,11 +2614,15 @@
     if (start) start.disabled = true;
     if (analyze) analyze.disabled = false;
     workbenchLog("工作台：" + reason);
+    // 跑完刷新文件占用面板 —— 结束时锁应该都释放了，如果还留着，
+    // 面板上能看出来（那通常意味着某个任务异常退出没交还）。
+    workbenchRefreshLocks();
   }
 
   function workbenchStop() {
     WB.stop = true;
     workbenchLog("停止请求已发，将在当前这张卡跑完后停下。");
+    workbenchRefreshLocks();
   }
 
   function workbenchLog(msg) {
@@ -2596,6 +2634,86 @@
       span.textContent = msg;
       head.appendChild(span);
     }
+  }
+
+  // ── 文件占用面板（中控化步骤 6）────────────────────────────────
+  //
+  // 文件锁是「两张**不同**的卡改了同一个文件」才触发的，而那件事在界面上
+  // 本来完全不可见 —— 用户只看到一张卡「排队中」，然后纳闷
+  // 「它和前面那张明明没关系，凭什么不能开工」。
+  //
+  // 所以这个面板要回答三件事，缺一件都没用：
+  //   ① 现在占着哪些文件、谁占的、还有多久到期
+  //   ② 每把锁对应哪几张**卡**（把文件锁翻译成用户认得的编号）
+  //   ③ 为什么被挡（冲突在哪个文件上）
+  function wbEsc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function wbFmtSec(sec) {
+    var n = Number(sec) || 0;
+    if (n <= 0) return "即将到期";
+    if (n < 60) return n + " 秒";
+    return Math.round(n / 60) + " 分钟";
+  }
+
+  function workbenchRenderLocks(res) {
+    var box = WB.el && WB.el.querySelector("[data-wb-locks]");
+    if (!box) return;
+    var body = box.querySelector("[data-wb-locks-body]");
+    var meta = box.querySelector("[data-wb-locks-meta]");
+    var locks = (res && res.locks) || [];
+    if (!locks.length) {
+      // 没有锁就整块藏起来 —— 空面板只是噪音
+      box.hidden = true;
+      if (body) body.textContent = "";
+      return;
+    }
+    box.hidden = false;
+    if (meta) meta.textContent = locks.length + " 个文件被占着";
+    if (!body) return;
+    body.innerHTML = locks.map(function (l) {
+      var files = (l.files || []).map(function (f) {
+        return '<span class="wb-lock-file">' + wbEsc(f) + "</span>";
+      }).join("");
+      var cards = (l.cards || []).length
+        ? '<span class="wb-lock-cards">卡：' + l.cards.map(wbEsc).join("、") + "</span>"
+        : '<span class="wb-lock-cards is-none">没对上台账里的卡</span>';
+      var closure = (l.closure || []).length;
+      return '<div class="wb-lock-row" data-wb-lock="' + wbEsc(l.lockId) + '">' +
+        '<span class="wb-lock-owner">' + wbEsc(l.owner || "?") + "</span>" +
+        '<span class="wb-lock-main">' + files +
+        (closure ? '<span class="wb-lock-closure">波及 ' + closure + " 个</span>" : "") +
+        "</span>" +
+        cards +
+        '<span class="wb-lock-ttl">' + wbFmtSec(l.expiresInSec) + "</span>" +
+        '<button type="button" class="wb-lock-reclaim" data-wb-lock-reclaim="' + wbEsc(l.lockId) +
+        '" title="确认这个任务已经死了 → 立刻释放它的锁">回收</button>' +
+        "</div>";
+    }).join("");
+    // 回收按钮：TTL 到期前同区域会被一直挡着，而「确认它死了」只有人能判断。
+    Array.prototype.forEach.call(body.querySelectorAll("[data-wb-lock-reclaim]"), function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.preventDefault();
+        var id = btn.getAttribute("data-wb-lock-reclaim");
+        if (!confirm("确认这个任务已经不会再动了？\n释放后别的任务可以立刻开工，但如果它其实还活着，两边会改同一批文件。")) return;
+        postJson(wbUrl("api/dispatch/reclaim"), { lockId: id, why: "界面手动回收" }, function (res2) {
+          if (res2 && res2.ok) workbenchLog("已回收锁 " + id);
+          else workbenchLog("回收失败：" + ((res2 && res2.error) || "?"));
+          workbenchRefreshLocks();
+        });
+      });
+    });
+  }
+
+  function workbenchRefreshLocks() {
+    if (!WB.el) return;
+    getJson(wbUrl("api/locks"), function (res, status) {
+      if (status !== 200 || !res || !res.ok) return;
+      workbenchRenderLocks(res);
+    });
   }
 
   function findWbStep(id) {
