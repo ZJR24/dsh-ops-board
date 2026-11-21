@@ -2419,6 +2419,147 @@
     });
   }
 
+  // ── 报意图那一轮的话术（2026-11-22）────────────────────────────
+  //
+  // 和 `wbVerdictNote()` 同一个套路：措辞集中一处，三个入口共用，
+  // 免得改一处漏两处。文案原则同样适用 —— **不出现专业术语**
+  // （用户明确要求过；`willUse` 就是这么来的）。
+  function wbIntentNote(cardId, title) {
+    return (
+      "自动工作台在做文件级调派，这一轮**先别动手**。\n" +
+      "这张卡是【" + title + "】（id：" + cardId + "）。\n\n" +
+      "请只做一件事：读代码、把要改的地方看清楚，然后回一份计划。\n" +
+      "**不要修改任何文件**，也不要跑任何会改文件的命令 —— 看板要先确认它和其他正在跑的卡\n" +
+      "不会动到同一处，再放行。\n\n" +
+      "计划格式（最后一条消息里附一个 ```json 代码块）：\n" +
+      '```json\n' +
+      '{"files":["相对项目根的路径.js"],\n' +
+      ' "willUse":["这次还会用到的别的文件"],\n' +
+      ' "plan":"一句话说明打算怎么改"}\n' +
+      '```\n' +
+      "- `files`：本次**会改**的文件（必须如实，只报真正要动的）；\n" +
+      "- `willUse`：还会**用到**的其他文件（比如要引入一个新文件）。没把握就写空数组，不影响后续；\n" +
+      "- 路径用正斜杠、相对项目根；不要报 node_modules，不要用绝对路径。\n\n" +
+      "如果读完代码发现**不需要改任何文件**（比如已经修好了），\n" +
+      "就直接回一行 `无需处理：原因`，不要编一份假的文件清单。"
+    );
+  }
+
+  // ── 文件级调派的执行包装（2026-11-22 接入执行链）──────────────
+  //
+  // 之前这里只有「定义」，从来没被调用过 —— 勾上开关也不会有任何效果。
+  // 现在真正接进 `workbenchAsk`：
+  //
+  //   ① 先问一轮「你打算改哪些文件」（不动手）
+  //   ② 拿回来交给 /api/dispatch 判冲突
+  //        · 放行 → 拿着锁，进入真正干活那一轮
+  //        · 排队 → 直接回报「被挡住」，让 settle 走「没做成」分支稍后重试
+  //   ③ 干完（或失败）→ 释放锁
+  //
+  // ⚠️ 为什么「排队」要当成「没做成」而不是失败：
+  //    它不是这张卡的问题，是时机问题。settle 的「没做成」分支会重试，
+  //    正是我们要的；而标记成 stuck 会让它永远停下。
+  function wbAskWithIntent(opts, done) {
+    var cardId = opts.cardId;
+    var title = opts.title;
+    var convKey = opts.convKey;
+    var ledgerPath = opts.ledgerPath;
+
+    // ① 问意图（这一轮 agent 不该动手，所以话术里明确禁止）
+    harnessAskOnce({
+      convKey: convKey,
+      text: wbIntentNote(cardId, title),
+      kind: "报计划",
+    }, function (r1) {
+      if (!r1.ok) {
+        // 意图这一轮就问不出来 —— 当成没做成，让外面重试
+        done({ ok: false, error: "报意图失败：" + (r1.error || "拿不到回答") });
+        return;
+      }
+      var intent = wbExtractIntent(r1.text);
+      var v = wbValidateIntent(intent);
+      if (!v.ok) {
+        workbenchLog("「" + cardId + "」的计划不合要求（" + v.error + "），按未做成处理。");
+        done({ ok: false, error: "计划不合要求：" + v.error, intentText: r1.text });
+        return;
+      }
+      // ② 判冲突
+      dispatchRequest(intent, cardId + " " + String(title || "").slice(0, 60), function (res, status) {
+        if (res && res.decision === "go") {
+          var lockId = (res.lock && res.lock.lockId) || "";
+          workbenchLog("「" + cardId + "」放行：" + (res.summary || "") +
+            (lockId ? "（锁 " + lockId + "）" : ""));
+          workbenchRefreshLocks();
+          // 意图写进台账（这就是 files 的**来源**，也是我们要的数据）
+          wbSaveIntentFiles(cardId, intent);
+          // ③ 真正干活
+          harnessAskOnce({
+            convKey: convKey,
+            text: wbWorkNote(cardId, title, ledgerPath, intent),
+            kind: "执行",
+          }, function (r2) {
+            dispatchRelease(lockId, function () {
+              workbenchRefreshLocks();
+              done({
+                ok: !!r2.ok,
+                text: r2.text || "",
+                error: r2.error || "",
+                by: r2.by || "",
+                files: intent.files,
+                lockId: lockId,
+              });
+            });
+          });
+          return;
+        }
+        if (res && res.decision === "queue") {
+          // 被挡住：不是这张卡的错，稍后重试
+          var why = (res.summary || res.reason || "与别的任务冲突");
+          workbenchLog("「" + cardId + "」排队等：" + why);
+          workbenchRefreshLocks();
+          done({ ok: false, error: "与其他任务冲突，稍后重试：" + why, connConflict: true, files: intent.files });
+          return;
+        }
+        // 被拒（计划本身不合格）
+        done({ ok: false, error: (res && (res.reason || res.error)) || "调派被拒", files: intent.files });
+      });
+    });
+  }
+
+  // 把意图里的 files 写回台账（0-a 的 setFiles 通道）。
+  // **这是关键一步**：不写回去，下次调度还是没有文件信息，
+  // 那「让文件级调派跑起来攒数据」这个目标就永远达不成。
+  function wbSaveIntentFiles(cardId, intent) {
+    if (!intent || !intent.files || !intent.files.length) return;
+    postJson(wbUrl("api/intent/files"), { id: cardId, files: intent.files, willUse: intent.willUse || [] },
+      function (res) {
+        if (res && res.ok) {
+          // 同步进内存里的 D.items，免得同一轮里再判冲突时还是旧值
+          if (D.items && D.items[cardId]) D.items[cardId].files = res.files;
+        } else {
+          workbenchLog("「" + cardId + "」的文件清单没存进台账：" + ((res && res.error) || "?"));
+        }
+      });
+  }
+
+  // 真正干活那一轮的话术：明确告诉它「计划已批准，现在动手」，
+  // 并把批准的文件清单再念一遍 —— 让它不要顺手改计划外的文件。
+  function wbWorkNote(cardId, title, ledgerPath, intent) {
+    var files = (intent.files || []).join("、");
+    return (
+      "计划已批准，现在可以动手了。\n" +
+      "这张卡是【" + title + "】（id：" + cardId + "）。\n" +
+      "已批准你要改的文件：" + (files || "(没报)") + "\n" +
+      "**只改这些**；如果中途发现必须动别的文件，先停下来在结论里说明，不要擅自扩大范围。\n\n" +
+      "台账文件在：" + (ledgerPath || "（当前看板目录）") + "\\ledger.json。\n" +
+      "要求：\n" +
+      "1) 实际动手解决它（排查/修改/清理/更新），拿真实证据，不要只给空泛建议；\n" +
+      "2) 处理完把这条卡在 ledger.json 里的状态收口（从 board.config.json 该车道的 stages 取收口状态）；\n" +
+      "3) 简要回报你做了什么、这条卡现在的状态。\n\n" +
+      wbVerdictNote()
+    );
+  }
+
   function releaseForWorkbench(id, by, done) {
     postJson(flowUrl("release"), { id: id, by: by }, function (res, status) {
       done && done(status === 200);
@@ -2463,6 +2604,19 @@
     // 会话键：有 convKey 就用它（并行=每路一条独立对话）；串行=固定「执行台」。
     var convTitle = convKey || WB_EXEC_KEY;
     var cleanId = String(cardId || "").trim() || String(itemTitle || "").split("·")[0].trim() || "";
+
+    // ⚠️ 演练模式优先：它明确要求「别动台账」，和文件级调派的「报完就动手」冲突，
+    //    两个都开时以演练为准（演练是安全模式，不该被别的开关抢走）。
+    if (!wbRehearsalOn() && wbFileDispatch()) {
+      wbAskWithIntent({
+        cardId: cleanId,
+        title: itemTitle,
+        convKey: convTitle,
+        ledgerPath: ledgerPath,
+      }, done);
+      return;
+    }
+
     var rehearsal = wbRehearsalOn();
     var text = rehearsal
       ? wbRehearsalNote([cleanId], ledgerPath) + "\n这张卡是：【" + itemTitle + "】"
@@ -2506,6 +2660,101 @@
         if (!finished) { finished = true; delete WP_ANSWERS[askId]; done({ ok: false, error: "等 Harness 回答超时", by: by }); }
       }, 240000);
     }, null, inline, "", fresh, { sessionTitle: convTitle, kind: "逐张执行" });
+  }
+
+  // 抽出一轮「问一次、等一个回答」的公共部分。
+  //
+  // 原来这段代码在 `workbenchAsk` 里，只能问一次。文件级调派需要**问两轮**
+  // （先报计划、再干活），所以抽出来复用 —— 两处各写一份必然漂。
+  function harnessAskOnce(opts, done) {
+    if (!harnessEnv()) { done({ ok: false, error: "要在 Harness 里打开才能问 AI" }); return; }
+    var convTitle = opts.convKey || WB_EXEC_KEY;
+    var askId = "";
+    var finished = false;
+    var by = WB.by || flowActor();
+    harnessPostWithCapture(convTitle, opts.text, false, function (result) {
+      if (!result.ok) {
+        if (!finished) { finished = true; done({ ok: false, error: result.error || "发送失败" }); }
+        return;
+      }
+      askId = result.askId || "";
+      WP_ANSWERS[askId] = {
+        by: by,
+        resolve: function (payload) {
+          if (finished) return;
+          finished = true;
+          delete WP_ANSWERS[askId];
+          done({ ok: !payload.error, text: payload.text || "", error: payload.error || "", by: by });
+        },
+      };
+      setTimeout(function () {
+        if (!finished) {
+          finished = true;
+          delete WP_ANSWERS[askId];
+          done({ ok: false, error: "等 Harness 回答超时", by: by });
+        }
+      }, 240000);
+    }, null, true, "", false, { sessionTitle: convTitle, kind: opts.kind || "执行" });
+  }
+
+  // 客户端侧的意图解析（和服务端 `intent.mjs` 同一套规则，但**不能共用代码**：
+  // client.js 是单文件 IIFE，内联进 HTML，import 不了 .mjs）。
+  //
+  // ⚠️ 两处必须保持一致：服务端解析用于 `/api/dispatch`，客户端解析用于
+  //    「拿到回答后立刻判」。漂了会出现「客户端说能解析、服务端说不行」。
+  //    所以两边的容错写法（五种围栏、`&` 之类）都照同一份来。
+  //    真正的一致性由 `dispatch-test` + `wb-file-dispatch-test` 各测一遍来兜。
+  function wbExtractIntent(text) {
+    var src = String(text || "");
+    var cands = [];
+    var re = /```[ \t]*(?:json|agent-ops-board|agent-autoloop)?[ \t]*\r?\n([\s\S]*?)```/gi;
+    var m;
+    while ((m = re.exec(src))) cands.push(m[1]);
+    var f = src.indexOf("{"), l = src.lastIndexOf("}");
+    if (f > -1 && l > f) cands.push(src.slice(f, l + 1));
+    for (var i = 0; i < cands.length; i++) {
+      var t = String(cands[i]).trim();
+      if (!t) continue;
+      try {
+        var o = JSON.parse(t);
+        if (o && typeof o === "object" && ("files" in o || "willUse" in o)) {
+          return {
+            ok: true,
+            files: wbNormFiles(o.files),
+            willUse: wbNormFiles(o.willUse),
+            raw: src,
+            error: "",
+          };
+        }
+      } catch (e) { /* 下一个候选 */ }
+    }
+    return { ok: false, files: [], willUse: [], raw: src, error: "没找到计划（要含 files 字段）" };
+  }
+
+  function wbNormFiles(input) {
+    if (input === undefined || input === null) return [];
+    var arr = Object.prototype.toString.call(input) === "[object Array]" ? input : [input];
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      var el = arr[i];
+      if (el === null || el === undefined || typeof el !== "string") continue;
+      var p = el.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+      if (p) out.push(p);
+    }
+    return out;
+  }
+
+  function wbValidateIntent(intent) {
+    if (!intent || !intent.ok) return { ok: false, error: (intent && intent.error) || "计划为空" };
+    if (!intent.files.length) return { ok: false, error: "没报要改哪些文件" };
+    if (intent.files.length > 200) return { ok: false, error: "报的文件太多（" + intent.files.length + " 个）" };
+    for (var i = 0; i < intent.files.length; i++) {
+      var f = intent.files[i];
+      if (/^[A-Za-z]:\//.test(f) || f.charAt(0) === "/") return { ok: false, error: "不能用绝对路径：" + f };
+      if (f.split("/").indexOf("..") > -1) return { ok: false, error: "不能跳出项目：" + f };
+      if (f.split("/").indexOf("node_modules") > -1) return { ok: false, error: "不该改 node_modules：" + f };
+    }
+    return { ok: true, error: "" };
   }
 
   function workbenchAskListener(event) {    if (event.origin !== window.location.origin) return;

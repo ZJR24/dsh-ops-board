@@ -39,6 +39,7 @@ import { createLockTable } from "./lib/locks.mjs";
 import { buildGraph } from "./lib/graph.mjs";
 import { requestDispatch, describeDispatch } from "./lib/dispatch.mjs";
 import { extractIntent } from "./lib/intent.mjs";
+import { createLedgerWriter, atomicWriteJson } from "./lib/ledger-write.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_ROOT = resolve(HERE, "..");
@@ -771,6 +772,36 @@ const server = createServer(async (req, res) => {
       const body = await readJson(req);
       const r = await fileLocks.forceRelease(String(body.lockId || ""), String(body.why || "手动回收"));
       return sendJson(res, r.ok ? 200 : 404, r);
+    }
+
+    // 把 agent 报的「要改哪些文件」写回台账（2026-11-22）。
+    //
+    // 这是 `files` 字段的**唯一实际来源** —— 在此之前台账里 66 条卡一条都没有它，
+    // 于是依赖图那套永远没有输入。让每次报意图都顺手写回去，
+    // 数据才会越攒越多，自动分组才有依据。
+    if (path === "/api/intent/files" && req.method === "POST") {
+      const body = await readJson(req);
+      const id = String(body.id || "").trim();
+      if (!id) return sendJson(res, 400, { ok: false, error: "缺卡片 id" });
+      const files = Array.isArray(body.files) ? body.files : [];
+      if (!files.length) return sendJson(res, 400, { ok: false, error: "files 为空，不写（免得把已有清单清掉）" });
+      const w = createLedgerWriter({
+        ledgerPath: LEDGER,
+        loadConfig: () => JSON.parse(readFileSync(join(ROOT, "board.config.json"), "utf8")),
+      });
+      const r = await w.setFiles(id, files, { by: String(body.by || "") });
+      // 顺带把 willUse 也记进台账：下次判冲突能用上，不用再问 agent 一遍
+      if (r.ok && Array.isArray(body.willUse) && body.willUse.length) {
+        try {
+          const led = JSON.parse(readFileSync(LEDGER, "utf8"));
+          const it = (led.items || []).find((x) => x && x.id === id);
+          if (it) {
+            it.willUse = body.willUse.map((x) => String(x).trim().replace(/\\/g, "/")).filter(Boolean);
+            atomicWriteJson(LEDGER, led);
+          }
+        } catch { /* willUse 只是锦上添花，写不进去不影响主流程 */ }
+      }
+      return sendJson(res, r.ok ? 200 : 400, r);
     }
 
     // 工作台：分析选中条目，给出串行 / 并行两种编排建议。
