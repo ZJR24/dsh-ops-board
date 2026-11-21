@@ -40,49 +40,54 @@ console.log("\n[2] 解析：路径归一（反斜杠、./ 前缀、空白）");
   ok(r2.files[0] === "utils/b.js", "去掉 ./ 前缀", r2.files[0]);
 }
 
-// ── ③ addsEdges（§十A.1 的关键）──
-console.log("\n[3] addsEdges：本次新增的依赖必须解析出来");
+// ── ③ willUse（原来叫 addsEdges，2026-11-21 改成白话）──
+console.log("\n[3] willUse：这次动手还会用到哪些文件");
 {
   const r = extractIntent(JSON.stringify({
     files: ["utils/request.js"],
-    addsEdges: [{ from: "utils/request.js", to: "utils/retry.js" }],
+    willUse: ["utils/retry.js"],
   }));
-  ok(r.ok && r.addsEdges.length === 1, "解析出 1 条新增依赖", JSON.stringify(r.addsEdges));
-  ok(r.addsEdges[0].from === "utils/request.js" && r.addsEdges[0].to === "utils/retry.js",
-    "from/to 都对", JSON.stringify(r.addsEdges[0]));
-  // 缺字段的条目要丢掉，不能产生半个边
-  const r2 = extractIntent('{"files":["a.js"],"addsEdges":[{"from":"a.js"},{"to":"b.js"},{"from":"x.js","to":"y.js"}]}');
-  ok(r2.addsEdges.length === 1, "残缺的边被丢掉（只留完整的）", JSON.stringify(r2.addsEdges));
+  ok(r.ok && r.willUse.length === 1, "解析出 1 个会额外用到的文件", JSON.stringify(r.willUse));
+  ok(r.willUse[0] === "utils/retry.js", "路径正确（就是文件名，不需要方向）", r.willUse[0]);
+  // 一个文件列表，不认残缺/非字符串
+  const r2 = extractIntent('{"files":["a.js"],"willUse":["b.js",null,"",123]}');
+  ok(r2.willUse.length === 1, "非字符串/空项被丢掉", JSON.stringify(r2.willUse));
+  // 兼容旧写法：模型还可能回 addsEdges，把 to 端收下来（不报错，意思是对的）
+  const r3 = extractIntent('{"files":["a.js"],"addsEdges":[{"from":"a.js","to":"b.js"}]}');
+  ok(r3.ok && r3.willUse.join(",") === "b.js", "旧写法 addsEdges 也能认（收 to 端）", JSON.stringify(r3.willUse));
 }
 
 // ── ④ 校验：该拒的都要拒 ──
 console.log("\n[4] 校验：放行坏意图 = 让调度失明");
 {
   const cases = [
-    ["空 files", { ok: true, files: [], addsEdges: [] }, /没报要改哪些文件/],
-    ["绝对路径 C:", { ok: true, files: ["C:/x/y.js"], addsEdges: [] }, /相对路径/],
-    ["绝对路径 /", { ok: true, files: ["/etc/passwd"], addsEdges: [] }, /相对路径/],
-    ["跳出项目 ..", { ok: true, files: ["../other/x.js"], addsEdges: [] }, /跳出项目/],
-    ["node_modules", { ok: true, files: ["node_modules/x/y.js"], addsEdges: [] }, /node_modules/],
-    ["文件太多", { ok: true, files: Array.from({ length: 300 }, (_, i) => "f" + i + ".js"), addsEdges: [] }, /太多/],
-    ["解析失败", { ok: false, files: [], addsEdges: [], error: "没找到意图报文" }, /意图报文/],
+    ["空 files", { ok: true, files: [], willUse: [] }, /没报要改哪些文件/],
+    ["绝对路径 C:", { ok: true, files: ["C:/x/y.js"], willUse: [] }, /相对路径/],
+    ["绝对路径 /", { ok: true, files: ["/etc/passwd"], willUse: [] }, /相对路径/],
+    ["跳出项目 ..", { ok: true, files: ["../other/x.js"], willUse: [] }, /跳出项目/],
+    ["node_modules", { ok: true, files: ["node_modules/x/y.js"], willUse: [] }, /node_modules/],
+    ["文件太多", { ok: true, files: Array.from({ length: 300 }, (_, i) => "f" + i + ".js"), willUse: [] }, /太多/],
+    ["解析失败", { ok: false, files: [], willUse: [], error: "没找到意图报文" }, /意图报文/],
   ];
   for (const [name, intent, re] of cases) {
     const v = validateIntent(intent);
     ok(v.ok === false && re.test(v.error), name + " → 拒收", v.error.slice(0, 50));
   }
-  const good = validateIntent({ ok: true, files: ["utils/request.js"], addsEdges: [] });
+  const good = validateIntent({ ok: true, files: ["utils/request.js"], willUse: [] });
   ok(good.ok === true, "正常意图通过", "ok");
 }
 
 // ── ⑤ 提示词 ──
-console.log("\n[5] 提示词：必须明确「先别动手」和「要报 addsEdges」");
+console.log("\n[5] 提示词：必须明确「先别动手」，且**不出现专业术语**");
 {
   const p = buildIntentPrompt();
   ok(/不要修改任何文件/.test(p), "明确禁止本轮改文件", "");
   ok(/先报计划/.test(p), "说清这一步是报计划", "");
-  ok(/addsEdges/.test(p), "要求报新增依赖", "");
-  ok(/误判为「不冲突」/.test(p), "**解释了为什么要报 addsEdges**（模型才愿意报）", "");
+  ok(/willUse/.test(p), "用了白话字段名 willUse", "");
+  // ⚠️ 2026-11-21 用户指出：这是通用插件，不许把图论/构建工具的术语漏给使用者
+  const jargon = ["addsEdges", "闭包", "依赖图", "边", "closure", "depcruise", "dependency"];
+  const hit = jargon.filter((w) => p.indexOf(w) > -1);
+  ok(hit.length === 0, "**提示词里没有专业术语**（用户/agent 都不该看到）", hit.join(",") || "(无)");
   ok(/无需处理/.test(p), "允许「不需要改文件」的诚实时（不逼它编清单）", "");
 }
 

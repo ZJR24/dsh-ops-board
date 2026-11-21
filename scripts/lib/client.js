@@ -2685,7 +2685,7 @@
       return '<div class="wb-lock-row" data-wb-lock="' + wbEsc(l.lockId) + '">' +
         '<span class="wb-lock-owner">' + wbEsc(l.owner || "?") + "</span>" +
         '<span class="wb-lock-main">' + files +
-        (closure ? '<span class="wb-lock-closure">波及 ' + closure + " 个</span>" : "") +
+        (closure ? '<span class="wb-lock-closure">还会影响 ' + closure + " 个文件</span>" : "") +
         "</span>" +
         cards +
         '<span class="wb-lock-ttl">' + wbFmtSec(l.expiresInSec) + "</span>" +

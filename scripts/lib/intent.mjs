@@ -1,4 +1,4 @@
-// Agent 意图回执的解析（0-b / §十B.1、§十A.1）。
+// Agent 意图回执的解析（0-b / §十B.1）。
 //
 // 为什么需要「报意图」这一步：中控要判「两个任务会不会抢同一块地」，
 // 必须知道它们**要改哪些文件**。而 agent 接活时只知道卡片标题 ——
@@ -7,15 +7,21 @@
 // 这是个死结：判冲突要文件清单 → 清单要读代码 → 读代码就是执行。
 // 解法：让 agent **先看、先报，报了才许动手**。报文就是下面这个格式。
 //
-// 为什么还要 `addsEdges`（本次新增哪些依赖）：
-// 图是「动手之前」建的。如果 agent 本次要**新加一条 import**，那条边在图里
-// 还不存在，别的 agent 改那个被依赖的文件时**不会被挡住** —— 这是最典型的
-// 冲突形态（一个加耦合、一个改被耦合的那方），而原方案会漏判它。
+// ── 为什么是 `willUse` 而不是 `addsEdges`（2026-11-21 用户指出）──
+//
+// 初版照搬架构文档的 `addsEdges: [{from,to}]`，那是个**图论概念**，
+// 不该出现在一个通用看板的对外约定里。而且它要求 agent 理解「边」和方向，
+// 对模型是个不必要的负担。
+//
+// 它真实要表达的事只有一件：**「这次动手还会牵动别的文件」**。
+// 用大白话说就是 willUse ——「我还会用到这些」。
 //
 //   { "files": ["utils/request.js"],
-//     "addsEdges": [{ "from": "utils/request.js", "to": "utils/retry.js" }] }
+//     "willUse": ["utils/retry.js"] }
 //
-// 这个信息 agent 本来就知道 —— 它要写的就是那行 require/import。
+// 有了它，判冲突就能把「还不存在的依赖关系」也算进去；
+// 没有它，只能靠重建一次依赖图（1.8 秒）自然包含 —— 那也可接受，
+// 所以这个字段是**可选的、锦上添花**，不是必须填。
 
 import { normalizeFiles } from "./ledger-write.mjs";
 
@@ -26,11 +32,11 @@ export { normalizeFiles };
  * 从 agent 的回复里抠出意图报文。
  *
  * 容忍三种常见写法（模型很爱这么写，不该因此判它不合格）：
- *   ① 带语言标记的围栏：```json ... ``` / ```agent-ops-board ... ```
+ *   ① 带语言标记的围栏：```json ... ```
  *   ② 不带标记的围栏：``` ... ```
  *   ③ 裸 JSON（整段就是 JSON，没有围栏）
  *
- * @returns { ok, files, addsEdges, raw, error }
+ * @returns { ok, files, willUse, raw, error }
  */
 export function extractIntent(text) {
   const src = String(text || "");
@@ -53,8 +59,8 @@ export function extractIntent(text) {
     if (!t) continue;
     try {
       const obj = JSON.parse(t);
-      // 认它是「意图报文」的最低要求：有 files 字段
-      if (obj && typeof obj === "object" && ("files" in obj || "addsEdges" in obj)) { parsed = obj; break; }
+      // 认它是「意图报文」的最低要求：有 files 或 willUse 字段
+      if (obj && typeof obj === "object" && ("files" in obj || "willUse" in obj)) { parsed = obj; break; }
     } catch (e) {
       parseError = String((e && e.message) || e);
     }
@@ -63,23 +69,24 @@ export function extractIntent(text) {
     return {
       ok: false,
       files: [],
-      addsEdges: [],
+      willUse: [],
       raw: src,
       error: parseError ? "报文不是合法 JSON：" + parseError : "没找到意图报文（要含 files 字段）",
     };
   }
 
   const files = normalizeFiles(parsed.files);
-  const addsEdges = [];
+  // 兼容旧写法：万一模型还是回了 addsEdges，把 to 端当 willUse 收下来
+  // （不强制报错 —— 它表达的意思是对的，只是名字旧了）。
+  const willUse = normalizeFiles(parsed.willUse);
   if (Array.isArray(parsed.addsEdges)) {
     for (const e of parsed.addsEdges) {
       if (!e || typeof e !== "object") continue;
-      const from = normalizeFiles([e.from])[0] || "";
-      const to = normalizeFiles([e.to])[0] || "";
-      if (from && to) addsEdges.push({ from, to });
+      const to = normalizeFiles([e.to])[0];
+      if (to && willUse.indexOf(to) === -1) willUse.push(to);
     }
   }
-  return { ok: true, files, addsEdges, raw: src, error: "" };
+  return { ok: true, files, willUse, raw: src, error: "" };
 }
 
 /**
@@ -116,6 +123,9 @@ export function validateIntent(intent, { maxFiles = 200 } = {}) {
 /**
  * 拼「先报意图」的提示词片段。
  *
+ * ⚠️ 文案原则（2026-11-21 用户要求）：**不许出现图论/构建工具的术语**。
+ * 这个插件是通用的，用户和 agent 都不该需要知道什么叫「边」「闭包」「波及面」。
+ *
  * ⚠️ 必须明确「**先别动手**」：模型看到任务就会直接开始改文件，
  * 那样锁就来不及加了。所以这段话要放在显眼位置，并且说清「报完等指令」。
  */
@@ -128,12 +138,13 @@ export function buildIntentPrompt() {
     "计划格式（最后一条消息里附一个 ```json 代码块）：",
     "```json",
     '{"files":["utils/request.js"],',
-    ' "addsEdges":[{"from":"utils/request.js","to":"utils/retry.js"}],',
+    ' "willUse":["utils/retry.js"],',
     ' "plan":"一句话说明打算怎么改"}',
     "```",
     "- `files`：本次**会改**的项目内相对路径（必须如实、只报真正要动的）；",
-    "- `addsEdges`：本次会**新增**的 import/require 关系（没有就写空数组）——",
-    "  这个必须报，否则别的窗口正在改那个文件时，看板会误判为「不冲突」而放行；",
+    "- `willUse`：这次动手还会**用到**哪些文件（比如你打算引入一个新文件）——",
+    "  没把握就留空数组，不影响后续；但如果确实会牵动别的文件，写上来能避免",
+    "  和另一张卡同时改到一处。",
     "- 路径用正斜杠、相对项目根；不要报 node_modules，不要用绝对路径。",
     "",
     "如果读完代码发现这张卡**不需要改任何文件**（比如已经修好了），",

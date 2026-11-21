@@ -2,12 +2,12 @@
 //
 // 一次调派的完整链路：
 //
-//   agent 报意图（files + addsEdges）
+//   agent 报意图（files + willUse）
 //        ↓
 //   ① 校验意图（0-b 的 validateIntent）
 //        ↓
-//   ② 建图 / 复用图 → 算反向闭包
-//   ③ 把 addsEdges 并入图再算一遍（§十A.1：防「新加的边」漏判）
+//   ② 建图 / 复用图 → 算反向影响面
+//   ③ 把 willUse 算进影响面（防「这次会牵动的新文件」漏判）
 //        ↓
 //   ④ R1/R2/R3 图外规则（.wxml/.wxss/app.json）
 //        ↓
@@ -18,39 +18,39 @@
 // 这个模块**只做判定与占锁**，不负责跑 agent —— 跑 agent 是工作台的事。
 // 这样它能被单独测，不依赖浏览器/SSE。
 
-import { buildGraph, reverseIndex, reverseClosure, mergeAddsEdges } from "./graph.mjs";
+import { buildGraph, reverseIndex, reverseClosure } from "./graph.mjs";
 import { applyOffGraphRules, offGraphConflict, GRAPH_EXTS } from "./offgraph.mjs";
 import { validateIntent } from "./intent.mjs";
 import { conflictFiles } from "./locks.mjs";
 
 /**
- * 算出「改这些文件会波及哪些文件」（含 addsEdges 的影响）。
+ * 算出「改这些文件会牵动哪些文件」（含 `willUse` 带来的额外影响）。
  *
- * ⚠️ 方向很关键，这里踩过一次坑（2026-11-21）：
+ * ⚠️ 语义（2026-11-21 从 `addsEdges` 改成 `willUse` 后简化了）：
  *
- *   反向闭包 closure(f) = 「谁依赖 f」= 改 f 会波及谁。
+ *   `willUse` 就是「这次动手还会用到这些文件」。
+ *   把它直接**并进我的影响面**即可 —— 不需要再伪造一条带方向的边。
  *
- *   所以：
- *     · 闭包(A) 里有 X  →  改 A 会影响 X     → B 要改 X 就冲突 ✅
- *     · 闭包(A) 里没有 X，但 A 依赖 X（正向下游）→ 改 A 碰不到 X，
- *       可是**改 X 会碰到 A** —— 这要靠「闭包(X) 含 A」来表达，
- *       不是靠「闭包(A) 含 X」。
- *
- *   把 addsEdges 并进图只是让**边变多**；真正起作用的机制是：
- *   并入 `A → retry` 之后，`闭包(retry)` 里就多了 A（以及 A 的上游），
- *   于是 B 要改 retry 时，它自己的闭包会与 A 的 files 相交 → 挡住。
- *
- * 这里的 `closure` 返回值只表示「A 的波及面」，**不承担**上面那条判据 ——
- * 那条由 `locks.conflictFiles` 的双向比对负责。
+ *   初版用的是 `addsEdges: [{from,to}]`，然后费劲去算「并边后闭包怎么变」，
+ *   还因为方向搞反踩过一次坑（见架构文档 §A.3）。改成 `willUse` 之后，
+ *   那段绕路整个消失了 —— **因为它本来就是「我的影响面包含这些」的意思**。
  */
-export function computeClosure({ files, addsEdges, edges }) {
-  const merged = mergeAddsEdges(edges || [], addsEdges || []);
-  const added = (merged.length - (edges || []).length);
-  const rev = reverseIndex(merged);
-  // 只拿图里存在的文件当 seed（.wxml 这类不在图里，交给 R3）
+export function computeClosure({ files, willUse, edges }) {
+  const rev = reverseIndex(edges || []);
+  // 只拿图里存在的文件当种子（.wxml 这类不在图里，交给 R3）
   const seeds = (files || []).filter((f) => GRAPH_EXTS.has(extOf(f)));
   const { closure } = reverseClosure(seeds, rev);
-  return { closure, edges: merged, usedAdds: added };
+  // willUse 直接算进影响面
+  //
+  // ⚠️ 加一层形态防御：`willUse` 应该是**字符串数组**，但旧调用方可能还传
+  //    `[{from,to}]`（`addsEdges` 的形状）。直接 `f.startsWith` 会抛 TypeError，
+  //    而这种错会整条调派链崩掉 —— 一个格式问题不该让调度停摆。
+  for (const raw of willUse || []) {
+    if (!raw) continue;
+    const f = typeof raw === "string" ? raw : (raw.to || raw.file || raw.path || "");
+    if (f && !f.startsWith("node_modules")) closure.add(f);
+  }
+  return { closure, usedWillUse: (willUse || []).length };
 }
 
 function extOf(p) {
@@ -82,39 +82,22 @@ export async function requestDispatch({ locks, intent, owner, task, grapher, ttl
   // ④ 图外规则先算（它不需要图，且能提前挡掉「同一组件的文件」）
   const off = applyOffGraphRules(intent.files);
 
-  // ② / ③ 算闭包（含 addsEdges）
+  // ② / ③ 算影响面（含 willUse）
   let closure = new Set();
   let graphErr = "";
-  let mergedEdges = null;
   if (off.graphFiles.length) {
     const g = await grapher();
     if (g && g.ok) {
-      const c = computeClosure({ files: off.graphFiles, addsEdges: intent.addsEdges, edges: g.edges });
+      const c = computeClosure({ files: off.graphFiles, willUse: intent.willUse, edges: g.edges });
       closure = c.closure;
-      mergedEdges = c.edges;
     } else {
       // ⚠️ 拿不到图时**不能当作没冲突放行**。降级为「只靠 R1/R2/R3 + 文件相等」，
       //    并把原因带出去，让人知道这次判定是弱化的。
       graphErr = (g && g.error) || "拿不到依赖图";
     }
-  }
-
-  // ⚠️ 关键一步（2026-11-21 踩过）：`addsEdges` 的效果**不在「A 的闭包变大」**上。
-  //
-  //   并边 A→retry 之后，闭包(A) 仍然不含 retry（retry 是 A 的下游，不是上游）。
-  //   真正发生变化的是**闭包(retry)** —— 它现在含 A 及其上游。
-  //
-  //   所以 A 占锁时，闭包里必须**额外把 addsEdges 的 to 端算进去**，
-  //   否则 B 要改 retry 时，B 的闭包虽然含 A，但 A 锁里既没有 retry 也没有
-  //   一条「我在用 retry」的痕迹 —— 比对只能靠 B.closure ∩ A.files，
-  //   而 A.files 里也没有 retry。
-  //
-  //   把 to 端加入 A 的闭包，判据立刻成立：
-  //     B.files(retry) ∩ A.closure(含 retry) ≠ ∅ → 挡住。
-  if (mergedEdges && intent.addsEdges && intent.addsEdges.length) {
-    for (const e of intent.addsEdges) {
-      if (e && e.to && !e.to.startsWith("node_modules")) closure.add(e.to);
-    }
+  } else if (intent.willUse && intent.willUse.length) {
+    // 没有 .js 要算、连图都不用建时，willUse 仍然要算进影响面
+    for (const f of intent.willUse) if (f) closure.add(f);
   }
 
   // ⑤ 申请锁：查冲突 + 加锁 在同一段队列内（由 locks.acquire 保证）
@@ -159,7 +142,7 @@ export async function requestDispatch({ locks, intent, owner, task, grapher, ttl
       closure: [...closure].sort(),
       // 让调用方能看到「这次是因为什么被放行」——图外规则补进来的文件也要交代
       addedByR1: [...off.addedByR1].sort(),
-      usedAddsEdges: (intent.addsEdges || []).length,
+      usedWillUse: (intent.willUse || []).length,
       graphDegraded: graphErr || null,
     };
   }
@@ -192,7 +175,7 @@ export function describeDispatch(result) {
     const parts = ["放行"];
     if (result.closure && result.closure.length) parts.push("波及 " + result.closure.length + " 个文件");
     if (result.addedByR1 && result.addedByR1.length) parts.push("同组件补入 " + result.addedByR1.length);
-    if (result.usedAddsEdges) parts.push("含 " + result.usedAddsEdges + " 条新增依赖");
+    if (result.usedWillUse) parts.push("还会用到 " + result.usedWillUse + " 个别的文件");
     if (result.graphDegraded) parts.push("⚠️ 降级：" + result.graphDegraded);
     return parts.join(" · ");
   }

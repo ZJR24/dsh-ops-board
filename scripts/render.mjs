@@ -861,7 +861,7 @@ function workbenchBlock() {
     -->
     <div class="workbench-filedispatch" data-wb-filedispatch-box>
       <label class="wb-mode-option"><input type="checkbox" data-wb-file-dispatch> 文件级调派（先报要改哪些文件，判完冲突再动手）</label>
-      <span class="wb-filedispatch-hint">勾上之后，每张卡多一步：先把「我要改哪些文件、要新加哪些依赖」报上来，看板按依赖图算出波及面、和正在跑的任务比对，没冲突才放行。挡的是「两张不同的卡改了同一个文件」—— 那种情况卡级互斥看不出来。多花一个来回，默认关。</span>
+      <span class="wb-filedispatch-hint">勾上之后，每张卡多一步：先把「我要改哪些文件、要新加哪些依赖」报上来，看板算出「这次会牵动哪些文件」、和正在跑的任务比对，没冲突才放行。挡的是「两张不同的卡改了同一个文件」—— 那种情况卡级互斥看不出来。多花一个来回，默认关。</span>
     </div>
     <div class="workbench-actions">
       <button type="button" class="btn" data-wb-analyze>分析</button>

@@ -1,12 +1,16 @@
 // 调派入口（§六 / §十B.1 / §十A.1）。
 //
-// 这一层把前面所有东西串起来：意图校验 → 建图 → 闭包 → addsEdges 并入
+// 这一层把前面所有东西串起来：意图校验 → 建图 → 影响面 → willUse → 图外规则 → 锁
+//
+// ⚠️ 术语（2026-11-21 用户指出这是通用插件）：对外一律用白话。
+//    `addsEdges`（图论概念）已改成 `willUse`（「还会用到这些文件」）。
+//    这个文件的**注释可以**提旧名以便追溯，但断言和报文一律用 willUse。
 // → 图外规则 → 查锁加锁 → 放行/排队。
 //
 // 测试要覆盖六种真实情形：
 //   ① 干净的任务能拿到锁
 //   ② 两个任务撞同一文件 → 第二个被排队并说明冲突
-//   ③ **addsEdges 造成的漏判**（§十A.1 的核心）——并边前放行、并边后挡住
+//   ③ **willUse 造成的漏判** —— 不报时放行、报了才挡住
 //   ④ 图外文件（.wxml）通过 R1 挡人
 //   ⑤ app.json 通过 R2 挡人
 //   ⑥ **拿不到图时不能当作没冲突放行**（降级要标明）
@@ -40,7 +44,7 @@ const EDGES = [
 ];
 const grapher = () => Promise.resolve({ ok: true, modules: [], edges: EDGES });
 
-const mkIntent = (files, adds) => ({ ok: true, files, addsEdges: adds || [], raw: "", error: "" });
+const mkIntent = (files, willUse) => ({ ok: true, files, willUse: willUse || [], raw: "", error: "" });
 
 // ── ① 干净任务 ──
 console.log("[1] 干净任务：拿到锁、给出波及面");
@@ -66,8 +70,8 @@ console.log("\n[2] 撞同一文件：第二个排队并说明冲突");
   ok(b.conflicts[0].owner === "A", "指出和谁冲突", b.conflicts[0].owner);
 }
 
-// ── ③ addsEdges 造成的漏判（核心）──
-console.log("\n[3] addsEdges：并边前放行 → 并边后挡住（§十A.1 的核心验证）");
+// ── ③ willUse 造成的漏判（核心）──
+console.log("\n[3] willUse：不报时放行 → 报了才挡住（漏判的核心验证）");
 {
   // 场景：A 要改 request.js 并**新增**依赖 retry.js；B 要改 retry.js
   // 图中原本没有 request.js → retry.js 这条边
@@ -78,18 +82,18 @@ console.log("\n[3] addsEdges：并边前放行 → 并边后挡住（§十A.1 �
     grapher,
   });
   ok(a.decision === "go", "A 放行", describeDispatch(a));
-  ok(a.usedAddsEdges === 1, "记录了 1 条新增依赖", a.usedAddsEdges + " 条");
+  ok(a.usedWillUse === 1, "记录了 1 个会额外用到的文件", a.usedWillUse + " 个");
   ok(a.closure.includes("utils/retry.js"),
     "**A 的波及面里出现了 retry.js**（并边之后才算得出来）", a.closure.join(","));
 
   const b = await requestDispatch({ locks, owner: "B", task: "改 retry", intent: mkIntent(["utils/retry.js"]), grapher });
   ok(b.decision === "queue", "**B 被挡住**（不并边的话这里会放行 → 漏判）", describeDispatch(b));
 
-  // 对照：如果不报 addsEdges
+  // 对照：如果不报 willUse
   const locks2 = freshLocks();
   await requestDispatch({ locks: locks2, owner: "A", task: "不报新增依赖", intent: mkIntent(["utils/request.js"]), grapher });
   const b2 = await requestDispatch({ locks: locks2, owner: "B", task: "改 retry", intent: mkIntent(["utils/retry.js"]), grapher });
-  ok(b2.decision === "go", "⚠️ 不报 addsEdges 时 B **会被放行** —— 这就是漏判", describeDispatch(b2));
+  ok(b2.decision === "go", "⚠️ 不报 willUse 时 B **会被放行** —— 这就是漏判", describeDispatch(b2));
 }
 
 // ── ④ 图外文件（R1）──
@@ -133,7 +137,7 @@ console.log("\n[6] 拿不到依赖图：降级为弱判定，并明确标出来"
 console.log("\n[7] 意图不合法：直接拒绝，不占锁");
 {
   const locks = freshLocks();
-  const r = await requestDispatch({ locks, owner: "A", task: "x", intent: { ok: true, files: [], addsEdges: [] }, grapher });
+  const r = await requestDispatch({ locks, owner: "A", task: "x", intent: { ok: true, files: [], willUse: [] }, grapher });
   ok(r.decision === "reject", "空 files → 拒绝", r.reason);
   ok(locks._count() === 0, "**没有占锁**", locks._count() + " 把");
   const r2 = await requestDispatch({ locks, owner: "A", task: "x", intent: mkIntent(["C:/abs.js"]), grapher });
@@ -164,15 +168,21 @@ console.log("\n[9] 不相干的任务：可以同时进行");
 }
 
 // ── ⑩ computeClosure 单测 ──
-console.log("\n[10] computeClosure：并边与不并边的差别");
+console.log("\n[10] computeClosure：willUse 直接算进影响面");
 {
-  const c1 = computeClosure({ files: ["utils/request.js"], addsEdges: [], edges: EDGES });
-  ok(!c1.closure.has("utils/retry.js"), "不并边：闭包没有 retry", "");
-  const c2 = computeClosure({ files: ["utils/request.js"], addsEdges: [{ from: "utils/request.js", to: "utils/retry.js" }], edges: EDGES });
-  ok(c2.usedAdds === 1, "记录并入了 1 条边", c2.usedAdds + " 条");
-  // 反向：改 retry.js 现在会波及 request.js
-  const c3 = computeClosure({ files: ["utils/retry.js"], addsEdges: [], edges: c2.edges });
-  ok(c3.closure.has("utils/request.js"), "**并入后改 retry 会波及 request**", [...c3.closure].join(","));
+  const c1 = computeClosure({ files: ["utils/request.js"], willUse: [], edges: EDGES });
+  ok(!c1.closure.has("utils/retry.js"), "不报 willUse：影响面里没有 retry", "");
+  ok(c1.closure.has("utils/data-store.js"), "但依赖图里真实存在的上游仍算进来", [...c1.closure].join(","));
+  const c2 = computeClosure({ files: ["utils/request.js"], willUse: ["utils/retry.js"], edges: EDGES });
+  ok(c2.usedWillUse === 1, "记录了 1 个会额外用到的文件", c2.usedWillUse + " 个");
+  ok(c2.closure.has("utils/retry.js"),
+    "**willUse 直接进了影响面**（不用伪造方向边）", [...c2.closure].join(","));
+  // 防御：旧格式（对象数组）不该让调派崩掉
+  const c3 = computeClosure({ files: ["utils/request.js"], willUse: [{ from: "x", to: "utils/retry.js" }], edges: EDGES });
+  ok(c3.closure.has("utils/retry.js"), "旧格式 {from,to} 也认（不让一个格式问题搞崩调度）", [...c3.closure].join(","));
+  // node_modules 不该进影响面（那是依赖，不是项目文件）
+  const c4 = computeClosure({ files: ["utils/request.js"], willUse: ["node_modules/x/y.js"], edges: EDGES });
+  ok(!c4.closure.has("node_modules/x/y.js"), "node_modules 不进来", "");
 }
 
 rmSync(TMP, { recursive: true, force: true });
