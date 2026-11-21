@@ -553,11 +553,16 @@ function viewClosed(config, ledger) {
 
   const emptyState = groups.length ? "" : `<p class="stage-empty">还没有已收口的条目。</p>`;
 
+  // kicker 用配置里的视图名，**不再硬编码**（2026-11-21 用户改名：
+  // 「已修复 / 已关闭 / 暂停」→「已上线 & 搁置」）。
+  // 硬编码过一次的代价：改配置不生效，得同时改代码，两处容易漂。
+  const closedView = (config.views || []).find((v) => v.kind === "closed");
+  const closedLabel = (closedView && closedView.label) || "已上线 & 搁置";
   return `<section class="view" data-view="closed" id="${viewId("closed")}">
   <div class="details-main">
     <!-- 大标题「收口记录」也删了（2026-11-20，和三个车道页一起）：
-         kicker 那行「已修复 / 已关闭 / 暂停」已经把这个页说清楚了。 -->
-    <div class="kicker">已修复 / 已关闭 / 暂停</div>
+         kicker 那行已经把这个页说清楚了。 -->
+    <div class="kicker">${esc(closedLabel)}</div>
     ${closedBoard(config, ledger)}
     ${body}
     ${emptyState}

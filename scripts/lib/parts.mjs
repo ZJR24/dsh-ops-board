@@ -479,11 +479,24 @@ export function stageBlock(config, lane, stage, items, options = {}) {
       ? `<button class="btn btn-ask head-ask" type="button" ${headAsk.attr}>${esc(headAsk.label)}</button>`
       : "";
 
-  // 已收口的阶段只留一行摘要并给个跳转，卡片在「已修复 / 已关闭 / 暂停」页渲染。
+  // 已收口的阶段只留一行摘要并给个跳转，卡片在收口页渲染。
   // 这样两页内容不重叠，同一个条目 id 在整页里只出现一次，hash 跳转不会撞车。
+  //
+  // ⚠️ 这段目前是**死代码**（2026-11-21 复核）：`shouldRenderStageSection()`
+  //    对 `stage.open === false` 直接返回 false，已收口分节根本不会被调用到，
+  //    所以 `stage-tail` 在两块板上都**没有任何输出**（实测：4 处命中全是 CSS 规则）。
+  //
+  //    留着的原因：1.5 改过一版「已收口分节保留一行摘要」的方案被撤回，
+  //    这段是那次尝试的残留；`viewLane` 传 `keepEmpty` 时会重新走到这里。
+  //    真要清理得连 `.stage-tail` 的 CSS 一起删 —— 但那属于「删功能」，
+  //    得等有人确认它确实不要了。
+  //
+  //    那句链接文字仍然**从配置读**，不硬编码：万一将来启用，名字不会漂。
   let body;
   if (!stage.open && list.length) {
-    body = `<p class="stage-tail">这 ${list.length} 项已收口，卡片都在 <a href="#${viewId("closed")}">已修复 / 已关闭 / 暂停</a> 页。</p>`;
+    const closedView = (config.views || []).find((v) => v.kind === "closed");
+    const closedLabel = (closedView && closedView.label) || "已上线 & 搁置";
+    body = `<p class="stage-tail">这 ${list.length} 项已收口，卡片都在 <a href="#${viewId("closed")}">${esc(closedLabel)}</a> 页。</p>`;
   } else if (!list.length) {
     body = `<p class="stage-empty">这一阶段暂时没有${esc(lane.countNoun)}。</p>`;
   } else {

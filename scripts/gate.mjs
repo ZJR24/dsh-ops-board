@@ -47,6 +47,8 @@ const SUITES = [
   { name: "nav-switch", file: "nav-switch-test.mjs", args: ["--board", CYBER], why: "菜单栏切换不掉链（视图与 hash 同步）" },
   { name: "closed-groups-cyber", file: "closed-groups-test.mjs", args: ["--board", CYBER], why: "收口页表格与分组一一对应（大看板）" },
   { name: "closed-groups-practise", file: "closed-groups-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板，0 收口）" },
+  { name: "closed-page-name-cyber", file: "closed-page-name-test.mjs", args: ["--board", CYBER], why: "收口页改名「已上线 & 搁置」（大看板）" },
+  { name: "closed-page-name-practise", file: "closed-page-name-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "feature-planlist-cyber", file: "feature-planlist-test.mjs", args: ["--board", CYBER], why: "需求页「计划列表」总览表（大看板）" },
   { name: "feature-planlist-practise", file: "feature-planlist-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "risk-mitigating-cyber", file: "risk-mitigating-test.mjs", args: ["--board", CYBER], why: "风险车道去掉「缓解中」（大看板）" },

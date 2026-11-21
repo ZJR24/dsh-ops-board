@@ -5,7 +5,12 @@
     "subtitle": "通用项目工作台 · 问题与需求",
     "slug": "ops-board"
   },
-  "metricStatuses": ["ok", "warn", "danger", "muted"],
+  "metricStatuses": [
+    "ok",
+    "warn",
+    "danger",
+    "muted"
+  ],
   "theme": "night",
   "views": [
     {
@@ -33,7 +38,7 @@
     },
     {
       "key": "closed",
-      "label": "已修复 / 已关闭 / 暂停",
+      "label": "已上线 & 搁置",
       "kind": "closed"
     },
     {

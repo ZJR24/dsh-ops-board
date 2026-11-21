@@ -328,8 +328,27 @@ if (askOff) {
 // 结果是每加一个新视图就误报一次 —— 它检查的是「有没有按原版排」，
 // 而真正该检查的是「渲染顺序有没有跟着配置走」。改成按配置比对，
 // 既不会因为加视图误报，又能抓到「配置改了但渲染没跟上」这种真错。
+/**
+ * 把 HTML 文本里的实体还原成字面字符。
+ *
+ * ⚠️ 为什么必须有（2026-11-21 用户把页名改成「已上线 & 搁置」后才暴露）：
+ *   导航里的标签经过 esc() 转义，`&` 变成 `&amp;`。而配置里是字面 `&`。
+ *   直接拿 `&amp;` 和 `&` 比 → 永远不相等 → 报「导航和配置不一致」的**假失败**。
+ *
+ *   只还原最常出现的几个（`&` `<` `>` `"` `'`），不做完整 HTML 解析 ——
+ *   这里只是比对显示文本，不需要处理所有实体。
+ */
+function decodeEntities(s) {
+  return String(s || "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");   // ← 必须最后做，否则 `&amp;lt;` 会被还原成 `<`
+}
+
 const navLabels = [...html.matchAll(/<nav class="nav">([\s\S]*?)<\/nav>/g)]
-  .flatMap((m) => [...m[1].matchAll(/<a[^>]*>([^<]*)<\/a>/g)].map((a) => a[1].trim()));
+  .flatMap((m) => [...m[1].matchAll(/<a[^>]*>([^<]*)<\/a>/g)].map((a) => decodeEntities(a[1]).trim()));
 if (!navLabels.length) {
   problems.push("找不到导航");
 } else {
@@ -340,12 +359,18 @@ if (!navLabels.length) {
       problems.push(`导航顺序和 board.config.json 的 views 不一致：实际 ${navLabels.join(" → ")}；配置 ${want.join(" → ")}`);
     }
   }
-  // 这三条跟顺序无关，是「必须存在 / 必须叫这个名」的硬约束，保留。
-  if (!navLabels.some((l) => l.indexOf("已修复") === 0)) {
-    problems.push("收口页的标签应跟原版一样叫「已修复 / 已关闭 / 暂停」");
+  // 这两条跟顺序无关，是「必须存在 / 不许自造名」的硬约束，保留。
+  //
+  // ⚠️ 名称来源改成**读配置**（2026-11-21 用户把「已修复 / 已关闭 / 暂停」
+  // 改成「已上线 & 搁置」）。写死名字的代价是：改名要同时改代码，
+  // 忘一处就变成「配置改了但验证还在找旧名」的假失败。
+  const closedViewCfg = (cfgViews || []).find((v) => v.kind === "closed");
+  const closedName = String((closedViewCfg && closedViewCfg.label) || "已上线 & 搁置").trim();
+  if (!navLabels.some((l) => l === closedName)) {
+    problems.push(`收口页的标签应叫「${closedName}」（与 board.config.json 的 views 一致）`);
   }
   if (navLabels.includes("已收口")) {
-    problems.push("还留着「已收口」这个自造的名字，原版叫「已修复 / 已关闭 / 暂停」");
+    problems.push("还留着「已收口」这个自造的名字，应该用配置里的「" + closedName + "」");
   }
   if (navLabels.indexOf("Skill 统计") === -1) {
     problems.push("导航里没有「Skill 统计」这一页");
