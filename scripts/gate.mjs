@@ -61,6 +61,11 @@ const SUITES = [
   { name: "fold-rotate-practise", file: "fold-rotate-test.mjs", args: ["--board", PRACTISE], why: "同上（小看板）" },
   { name: "wb-tries", file: "wb-tries-test.mjs", args: [], why: "跑完了 ≠ 做成了：没改台账要重试，3 次才标红" },
   { name: "wb-verdict", file: "wb-verdict-test.mjs", args: [], why: "结论前缀：完成/未完成/无需处理 三种各得其所" },
+  // 中控化地基（0-c / 0-d / 0-e / 0-f，§十C、§十E）。纯 Node 模块，不起浏览器，很快。
+  { name: "ledger-write", file: "ledger-write-test.mjs", args: [], why: "台账写入：队列/校验/幂等/原子落盘" },
+  { name: "locks", file: "locks-test.mjs", args: [], why: "锁表：查+加原子、TTL、重启恢复" },
+  { name: "inbox", file: "inbox-test.mjs", args: [], why: "回报 inbox：先落盘再处理、重启可重放" },
+  { name: "git-baseline", file: "git-baseline-test.mjs", args: [], why: "git 基线：抓「改了没报」" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
   { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },
