@@ -27,5 +27,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "dependency-cruiser": "^18.8.0",
+    "typescript": "^5.9.3"
   }
 }
