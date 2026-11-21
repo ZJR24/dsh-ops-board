@@ -68,6 +68,8 @@ const SUITES = [
   { name: "git-baseline", file: "git-baseline-test.mjs", args: [], why: "git 基线：抓「改了没报」" },
   { name: "intent", file: "intent-test.mjs", args: [], why: "agent 报意图：解析/校验/提示词" },
   { name: "graph", file: "graph-test.mjs", args: [], why: "依赖图 + 闭包 + addsEdges 并入" },
+  { name: "offgraph", file: "offgraph-test.mjs", args: [], why: "图外规则 R1/R2/R3（wxml/wxss/app.json）" },
+  { name: "dispatch", file: "dispatch-test.mjs", args: [], why: "调派：报意图 → 判冲突 → 放行/排队" },
   { name: "card-fold-cyber", file: "card-fold-test.mjs", args: ["--board", CYBER], why: "卡片收起/展开（大看板）" },
   { name: "card-fold-practise", file: "card-fold-test.mjs", args: ["--board", PRACTISE], why: "卡片收起/展开（小看板）" },
   { name: "section-fold-cyber", file: "section-fold-test.mjs", args: ["--board", CYBER], why: "每个大标题模块都能收起（大看板）" },
