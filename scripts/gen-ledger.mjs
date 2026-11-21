@@ -141,6 +141,36 @@ function normPairs(input, keyName, at, fieldName, fallbackKey) {
   return out;
 }
 
+/**
+ * 规整 files 字段（0-a，2026-11-21）。
+ *
+ * 规则：
+ *   · 必须是字符串数组（传单个字符串也容忍，包成数组）；
+ *   · 空项丢掉；
+ *   · **反斜杠归一成正斜杠** —— 跨平台比对必须统一，否则 `utils\a.js`
+ *     与 `utils/a.js` 会被当成两个不同文件，冲突判定直接失效；
+ *   · 去掉 `./` 前缀、去掉首尾空白；
+ *   · 保留重复项的原样（去重放在比对时做，这里不改写用户数据）。
+ *
+ * ⚠️ 这里**不校验文件是否真实存在**。原因：卡片可能指向「待创建」的文件
+ * （比如「新增 utils/retry.js」），路径存在性由建图阶段判断。
+ */
+function normFiles(input, at) {
+  if (input === undefined || input === null) return [];
+  const arr = Array.isArray(input) ? input : [input];
+  const out = [];
+  for (const el of arr) {
+    if (el === null || el === undefined) continue;
+    if (typeof el !== "string") {
+      errors.push(`${at} 的 files 里有非字符串项，已忽略`);
+      continue;
+    }
+    const p = el.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+    if (p) out.push(p);
+  }
+  return out;
+}
+
 // ── 逐条规范化 ──────────────────────────────────────────────────
 
 const now = new Date();
@@ -230,6 +260,17 @@ for (let i = 0; i < candidates.length; i++) {
   const sections = normPairs(c.sections, "label", at, "sections", "具体表现");
   const evidence = normPairs(c.evidence, "kind", at, "evidence", "记录");
   const area = c.area !== undefined ? String(c.area) : "";
+  // files：这张卡**会改哪些文件**（0-a，2026-11-21）。
+  //
+  // 为什么要这个字段：中控判「两个任务会不会抢同一块地」需要文件清单，
+  // 而在此之前台账里**没有任何可靠的文件信息** —— evidence 里虽然常出现路径，
+  // 但那是自然语言（「cloudfunctions/x/index.js 的 guard()」「data/projects*.json」
+  // 「云存储 data/...」），实测 52/66 条有文件名、却一条都提不干净，不能当输入。
+  //
+  // 所以单独立一个字段，由 agent 在**报意图**时填（见 §十B.1）。
+  // 这里只做「形状校验」：必须是字符串数组、去掉空项、反斜杠归一成正斜杠
+  // （跨平台比对必须统一，否则 `utils\a.js` 与 `utils/a.js` 会被当成两个文件）。
+  const files = normFiles(c.files, at);
 
   out.push({
     id,
@@ -238,6 +279,7 @@ for (let i = 0; i < candidates.length; i++) {
     status,
     ...(severity ? { severity } : {}),
     ...(area ? { area } : {}),
+    ...(files.length ? { files } : {}),
     owner: typeof c.owner === "string" ? c.owner : "",
     sections,
     evidence,

@@ -221,6 +221,26 @@ console.log("\n[9] 混合压力：并发写入 + 重复 askId + 过期期望，�
   ok(Object.values(perCard).every((n) => n === 1), "每张卡只有 1 条 history（没被写两遍）", JSON.stringify(perCard));
 }
 
+// ── ⑩ setFiles：补 files 字段（0-a）──
+console.log("\n[10] setFiles：补文件清单，不产生 history 噪音");
+{
+  seed(2);
+  const writer = createLedgerWriter({ ledgerPath: LEDGER, loadConfig: () => CONFIG });
+  const r = await writer.setFiles("OPS-001", [".\\utils\\a.js", " b.js ", ""]);
+  const led = read();
+  const it = led.items.find((x) => x.id === "OPS-001");
+  ok(r.ok === true, "写入成功", JSON.stringify(r.files));
+  ok(it.files.join(",") === "utils/a.js,b.js", "归一后写进台账（反斜杠/空项处理）", JSON.stringify(it.files));
+  ok(led.history.length === 0, "**没产生 history**（元数据更新不该污染时间线）", led.history.length + " 条");
+  ok(it.status === "open", "状态没被改", it.status);
+  const bad = await writer.setFiles("OPS-999", ["a.js"]);
+  ok(bad.ok === false && /没有这张卡/.test(bad.error), "卡不存在 → 拒", bad.error);
+  const empty = await writer.setFiles("OPS-001", []);
+  ok(empty.ok === false && /为空/.test(empty.error), "空清单不覆盖原值", empty.error);
+  const still = read().items.find((x) => x.id === "OPS-001");
+  ok(still.files.join(",") === "utils/a.js,b.js", "原值还在（没被空清单清掉）", JSON.stringify(still.files));
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

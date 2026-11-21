@@ -222,10 +222,63 @@ export function createLedgerWriter({ ledgerPath, loadConfig, now }) {
 
   return {
     apply,
+    /**
+     * 只更新某张卡的 `files` 字段（0-a）。
+     *
+     * 为什么单独一个入口、不走 `apply()`：
+     *   · `apply()` 处理的是**状态变更**（要校验状态名合法性、要写 history）；
+     *   · 补 files 是**元数据更新**，不改状态、不该产生 history 噪音。
+     * 混在一起会让 history 里塞满「补了个文件列表」这种记录。
+     *
+     * @param files  字符串数组；反斜杠归一、去空项（和 gen-ledger 的 normFiles 同规则）
+     */
+    setFiles(id, files, meta) {
+      const m = meta || {};
+      const cardId = String(id || "").trim();
+      if (!cardId) return Promise.resolve({ ok: false, error: "缺卡片 id" });
+      return enqueue(async () => {
+        const release = acquireFileLock(ledgerPath + ".lock");
+        try {
+          const ledger = readLedger();
+          const items = (ledger && Array.isArray(ledger.items)) ? ledger.items : [];
+          const item = items.find((x) => x && x.id === cardId);
+          if (!item) return { ok: false, error: "台账里没有这张卡：" + cardId };
+          const list = normalizeFiles(files);
+          if (!list.length) return { ok: false, error: "files 为空，不覆盖原值" };
+          item.files = list;
+          item.updatedAt = clock();
+          ledger.updatedAt = item.updatedAt;
+          atomicWriteJson(ledgerPath, ledger);
+          return { ok: true, id: cardId, files: list, by: m.by || "" };
+        } finally {
+          release();
+        }
+      });
+    },
     /** 测试用：清空幂等表 */
     _resetSeen() { seen.clear(); },
     _seenCount() { return seen.size; },
   };
+}
+
+/**
+ * 归一文件路径列表。和 `gen-ledger.mjs` 的 `normFiles` 保持同一规则 ——
+ * 反斜杠转正斜杠、去 `./` 前缀、去空项。
+ *
+ * ⚠️ 两处**必须一致**：一处归一、另一处不归一，`utils\a.js` 和 `utils/a.js`
+ * 就会被当成两个文件，冲突判定直接失效。这是跨平台最容易踩的坑。
+ */
+export function normalizeFiles(input) {
+  if (input === undefined || input === null) return [];
+  const arr = Array.isArray(input) ? input : [input];
+  const out = [];
+  for (const el of arr) {
+    if (el === null || el === undefined) continue;
+    if (typeof el !== "string") continue;
+    const p = el.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+    if (p) out.push(p);
+  }
+  return out;
 }
 
 /** 状态 → history 的 kind（决定时间线小圆点颜色）。未知的退化到 ops。 */
